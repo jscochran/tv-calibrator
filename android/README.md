@@ -95,6 +95,11 @@ cd push-worker; npx wrangler deploy
   CRLF, git's `core.autocrlf` rewrote it. Don't deploy until that is fixed, or phones reject the file.
 - Self-test: `python tools\tests\test_build_catalog.py`.
 
+## Training day
+
+The step-by-step for training Android camera profiles with the Display Plus HL on Windows is in
+[docs/TRAINING-DAY.md](docs/TRAINING-DAY.md).
+
 ## Roadmap
 
 | Phase | Work | Needs |

@@ -33,6 +33,6 @@ data object LiveRoute
 @Serializable
 data object SettingsRoute
 
-/** Swift Route.lab: LabEntry (the lab build's placeholder until P5). */
+/** Swift Route.lab: LabEntry (Lab mode in the lab build; an empty stub in the standard build). */
 @Serializable
 data object LabRoute

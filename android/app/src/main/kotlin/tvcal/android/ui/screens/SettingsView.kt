@@ -18,6 +18,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,7 +63,8 @@ import tvcal.kit.SignalMode
  *   (notifications.settingsIntent()); else "Turn on notifications" (permissionToRequest() → launcher →
  *   turnOn(granted)). "Sounds" Switch = prefs.boolState(Chime.enabledKey, true). refreshStatus() on start/resume.
  * - About: "TV Calibrator by Slidebean" + "Version <AppInfo.version> (<AppInfo.build>)", Instagram, "Lab mode"
- *   (lab build only → [onOpenLab], detail "Train with the computer"), "Measurements stay on this phone; …".
+ *   (lab build only → [onOpenLab], detail "Train with the computer"; five taps on the version open it too),
+ *   "Measurements stay on this phone; …".
  */
 @Composable
 fun SettingsView(profiles: ProfileService, onBack: () -> Unit, onOpenLab: () -> Unit) {
@@ -281,9 +283,22 @@ private fun AboutSection(onOpenLab: () -> Unit) {
     val app = LocalApp.current
     val context = LocalContext.current
     val links = app.links.links
+    // Lab build: five taps on the version open Lab mode too (as on the iPhone's Lab build).
+    var versionTaps by remember { mutableIntStateOf(0) }
     Card(spacing = 12.dp) {
         SettingsRow(
             "TV Calibrator by Slidebean",
+            if (AppModel.isLabBuild) {
+                Modifier.clickable(indication = null, interactionSource = null) {
+                    versionTaps += 1
+                    if (versionTaps >= 5) {
+                        versionTaps = 0
+                        onOpenLab()
+                    }
+                }
+            } else {
+                Modifier
+            },
             detail = "Version ${AppInfo.version} (${AppInfo.build})",
             symbol = Symbols.info,
         )

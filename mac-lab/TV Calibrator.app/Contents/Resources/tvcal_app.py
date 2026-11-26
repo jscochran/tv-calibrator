@@ -2,17 +2,21 @@
 """
 TV Calibrator - a small local app around tvcal.py.
 
-Runs a web server on this Mac (http://127.0.0.1:8765) and opens it in your browser. Devices on
-your network can only use it after pairing with the code shown in the app (the iPhone app does
-this). Nothing is sent anywhere else. Quit from the app's sidebar.
+Runs a web server on this computer (http://127.0.0.1:8765) and opens it in your browser. Devices on
+your network can only use it after pairing with the code shown in the app (the iPhone and Android
+lab apps do this). Nothing is sent anywhere else. Quit from the app's sidebar.
 
     python3 tvcal_app.py          # with the meter
     python3 tvcal_app.py --sim    # demo with a simulated TV + meter
+    python3 tvcal_app.py --sim --port 8766 --no-browser   # another port, no browser window
+
+Runs on macOS and Windows (see mac-lab/README.md).
 """
 
 import argparse
 import collections
 import functools
+import hashlib
 import json
 import math
 import os
@@ -38,13 +42,17 @@ import tvcal as T  # noqa: E402
 PORT = 8765
 APP_VERSION = os.environ.get("TVCAL_VERSION", "2026.11.12d")
 PID_FILE = os.path.expanduser("~/tvcal/app-{port}.pid")
-IDLE_QUIT = 20 * 60          # quit after 20 minutes with no browser tab or iPhone talking to it
+IDLE_QUIT = 20 * 60          # quit after 20 minutes with no browser tab or phone talking to it
 LAST_ACTIVITY = time.time()
 APP_DIR = os.path.expanduser("~/tvcal")
 SETTINGS = os.path.join(APP_DIR, "_app.json")
 SIM = False
 LOCK = threading.Lock()        # one thing talks to the meter at a time
-PAIR_CODE = f"{secrets.randbelow(10000):04d}"   # shown in the Mac app; typed on the iPhone once
+PAIR_CODE = f"{secrets.randbelow(10000):04d}"   # shown in the app on the computer; typed on the phone once
+WINDOWS = sys.platform == "win32"
+COMPUTER = "Mac" if sys.platform == "darwin" else "computer"     # in messages: "the Mac" / "the computer"
+_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {}   # helper tools: no console flash
+DEFAULT_PHONE = "iPhone" if sys.platform == "darwin" else "phone"   # a phone that sent no model (macOS: as before)
 
 
 # ======================================================================== settings & state
@@ -55,7 +63,7 @@ def load_settings():
         if not os.path.exists(SETTINGS):
             break
         try:
-            with open(SETTINGS) as f:
+            with T.io_lock(), open(SETTINGS) as f:
                 return json.load(f)
         except (ValueError, OSError):
             time.sleep(0.05)            # caught it mid-write (older copies wrote in place); try again
@@ -73,7 +81,7 @@ def tv_key(name):
 def state_for(name, hdr):
     path = T.state_path(tv_key(name), hdr)
     if os.path.exists(path):
-        with open(path) as f:
+        with T.io_lock(), open(path) as f:
             st = json.load(f)
         if st.get("version", 1) < T.STATE_VERSION:
             return path, None
@@ -226,7 +234,7 @@ def log_confirm(name, hdr, n, plan, ok):
 
 
 def log_bridge(name, pairs, fit, model):
-    out = [f"\n## Taught the iPhone camera ({model}) {datetime.now():%Y-%m-%d %H:%M}\n",
+    out = [f"\n## Taught the phone camera ({model}) {datetime.now():%Y-%m-%d %H:%M}\n",
            f"Average dE vs the meter {fit['de_avg']:.2f}, worst {fit['de_max']:.2f}, {fit['n']} patches\n\n",
            "| patch | cd/m² | x | y | camera dE |\n|---|---|---|---|---|\n"]
     for p, de in zip(pairs, fit["des"]):
@@ -251,15 +259,27 @@ def export_tv(name):
 
 
 def reveal(path):
+    """Show a file (selected) or a folder in Finder / File Explorer."""
     if sys.platform == "darwin":
         subprocess.Popen(["open", "-R", path] if os.path.isfile(path) else ["open", path])
+    elif WINDOWS:
+        p = os.path.normpath(path)
+        try:
+            if os.path.isfile(p):
+                # one command-line string: explorer wants /select,"path" exactly like this
+                subprocess.Popen(f'explorer /select,"{p}"')
+            else:
+                os.startfile(p)
+        except OSError as e:
+            print("Couldn't open File Explorer:", e)
 
 
-# ======================================================================== the iPhone (pattern player + remote)
+# ======================================================================== phones (iPhone: pattern player + remote; any phone: camera)
 
 class Phone:
-    """One paired iPhone. It polls for the pattern to show (and confirms when it's on the TV) and for
-    camera readings to take. Several can be connected at once (training profiles side by side)."""
+    """One paired phone (iPhone or Android). It polls for the pattern to show (and confirms when it's on
+    the TV) and for camera readings to take. Several can be connected at once (training profiles side by
+    side)."""
 
     def __init__(self, token=""):
         self.token = token
@@ -280,7 +300,9 @@ class Phone:
         self.waiting = set()
         self.results = {}
         self.cam_ready = False
-        self.model = ""
+        self.model = ""          # iPhone: "iPhone18,1"; Android: "manufacturer/device", e.g. "samsung/e2q"
+        self.name = ""           # marketing name the phone sent, e.g. "Galaxy S24+" (optional)
+        self.os = ""             # e.g. "iOS 26.1" or "Android 16" (optional, for the records)
 
     def connected(self):
         return time.time() - self.last_seen < 3.0
@@ -289,8 +311,9 @@ class Phone:
         return {"connected": self.connected(), "device": self.device, "external": self.external,
                 "ext_name": self.ext_name, "code": PAIR_CODE,
                 "camera": self.connected() and self.cam_ready, "model": self.model,
+                "label": model_label(self.model, None, self.name) if self.model else "",
                 "paired": bool(load_settings().get("phones")), "host": socket.gethostname(), "ip": lan_ip(),
-                "port": PORT}
+                "port": PORT, "computer": COMPUTER, "discovery": BONJOUR.kind}
 
     def set(self, pattern, patch=None):
         with self.cv:
@@ -310,7 +333,7 @@ class Phone:
         with self.cv:
             ok = self.cv.wait_for(lambda: self.ack >= seq, timeout=timeout)
         if not ok:
-            raise RuntimeError("The iPhone stopped responding. Keep the TV Calibrator app open on the "
+            raise RuntimeError("The phone stopped responding. Keep the TV Calibrator app open on the "
                                "phone, with the screen on.")
         self.shown = p
 
@@ -332,7 +355,7 @@ class Phone:
             ok = self.cv.wait_for(lambda: seq in self.results, timeout=timeout)
             self.waiting.discard(seq)
             if not ok:
-                raise RuntimeError("The iPhone camera didn't answer. Keep TV Cal Lab open on the phone "
+                raise RuntimeError("The phone camera didn't answer. Keep TV Cal Lab open on the phone "
                                    "with the camera running.")
             return self.results.pop(seq)
 
@@ -354,10 +377,10 @@ class Phone:
                 self.cv.notify_all()
 
     def view(self):
-        """For the Mac's lists of phones."""
+        """For the computer's lists of phones."""
         prof = load_profiles().get(self.model) if self.model else None
-        return {"key": self.token, "device": self.device, "model": self.model,
-                "label": model_label(self.model, prof), "connected": self.connected(),
+        return {"key": phone_key(self.token), "device": self.device, "model": self.model,
+                "label": model_label(self.model, prof, self.name), "connected": self.connected(),
                 "camera": self.connected() and self.cam_ready, "external": self.external,
                 "profile": profile_summary(prof, self.model) if prof and prof.get("M") else None}
 
@@ -384,7 +407,8 @@ def patch_pattern(p, mode="sdr"):
     return {"kind": "black"}
 
 
-# Marketing names for the model identifiers the phones report (a profile's own name wins).
+# Marketing names for the model identifiers the phones report (a profile's own name wins). Android
+# phones report "manufacturer/device" (e.g. "samsung/e2q") and send their marketing name themselves.
 MODEL_NAMES = {
     "iPhone15,2": "iPhone 14 Pro", "iPhone15,3": "iPhone 14 Pro Max", "iPhone15,4": "iPhone 15",
     "iPhone15,5": "iPhone 15 Plus", "iPhone16,1": "iPhone 15 Pro", "iPhone16,2": "iPhone 15 Pro Max",
@@ -395,8 +419,30 @@ MODEL_NAMES = {
 }
 
 
-def model_label(model, prof=None):
-    return (prof or {}).get("name") or MODEL_NAMES.get(model or "", model or "iPhone")
+def model_label(model, prof=None, name=""):
+    """A phone model's display name: the profile's own name, a known iPhone name, the name the phone
+    sent, else the model key itself."""
+    return (prof or {}).get("name") or MODEL_NAMES.get(model or "") or name or model or DEFAULT_PHONE
+
+
+def is_iphone(model):
+    return (model or "").startswith("iPhone")
+
+
+def os_update(model):
+    """For messages: "an iOS update" for an iPhone, "an Android update" for an Android model key."""
+    return "an iOS update" if is_iphone(model) else "an Android update" if "/" in (model or "") else "a system update"
+
+
+def model_file_name(model):
+    """A model key that's safe in a file name ("samsung/e2q" -> "samsung_e2q"; "iPhone18,1" unchanged)."""
+    return re.sub(r"[^A-Za-z0-9,._ +()-]+", "_", model or "").strip(" .") or "phone"
+
+
+def phone_key(token):
+    """A phone's id in job views and Training files: a short hash, never the pairing token itself (a token
+    is a live credential for this app's API)."""
+    return hashlib.sha256(token.encode()).hexdigest()[:8] if token else ""
 
 
 PHONES = {}                       # pairing token -> Phone
@@ -408,6 +454,9 @@ def phone_for(token):
         p = PHONES.get(token)
         if p is None:
             p = PHONES[token] = Phone(token)
+            rec = load_settings().get("phones", {}).get(token) if token else None
+            if rec:                              # the version it sent when pairing (until it sends one again)
+                phone_os_from(p, rec)
         return p
 
 
@@ -452,6 +501,21 @@ def training_phones():
     return ps
 
 
+def dev_os(d):
+    """The OS version to record for a training phone (read when saving, so it's there even if the phone
+    sent it only with its readings). Android only: iPhone sessions keep the shape they always had."""
+    return "" if is_iphone(d["model"]) else (d["phone"].os or "")
+
+
+def phone_os_from(ph, d):
+    """Optional "android" / "ios" version a phone sends (query or body), kept for the records."""
+    for k, label in (("android", "Android"), ("ios", "iOS")):
+        v = d.get(k)
+        if v not in (None, ""):
+            ph.os = f"{label} {str(v)[:20]}"
+            return
+
+
 def lan_ip():
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -462,30 +526,70 @@ def lan_ip():
 
 
 class Bonjour:
-    """Advertise the app on the local network so the iPhone can find it (macOS's built-in dns-sd)."""
+    """Advertise the app on the local network so the phones can find it (_tvcal._tcp, TXT ip/port/host).
+    Uses dns-sd (built into macOS; on Windows it comes with Apple's Bonjour), else python-zeroconf if
+    it's installed (pip install zeroconf), else nothing: the phone is then pointed at IP:port by hand,
+    which the page shows."""
 
     def __init__(self):
         self.proc = None
+        self.zc = None
+        self.info = None
+        self.kind = None             # "dns-sd", "zeroconf" or None (not advertised)
 
     def start(self, port):
-        if not shutil.which("dns-sd"):
-            return
         name = f"TV Calibrator on {socket.gethostname().split('.')[0]}"
+        host = socket.gethostname().split(".")[0] + ".local"
+        if shutil.which("dns-sd"):
+            try:
+                self.proc = subprocess.Popen(["dns-sd", "-R", name, "_tvcal._tcp", "local", str(port),
+                                              f"ip={lan_ip()}", f"port={port}", f"host={host}"],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_NO_WINDOW)
+                self.kind = "dns-sd"
+                return
+            except OSError:
+                self.proc = None
         try:
-            host = socket.gethostname().split(".")[0] + ".local"
-            self.proc = subprocess.Popen(["dns-sd", "-R", name, "_tvcal._tcp", "local", str(port),
-                                          f"ip={lan_ip()}", f"port={port}", f"host={host}"],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError:
-            self.proc = None
+            from zeroconf import ServiceInfo, Zeroconf
+        except Exception:                         # not installed (optional)
+            self.kind = None
+            return
+        try:
+            ip = lan_ip()
+            self.info = ServiceInfo("_tvcal._tcp.local.", f"{name}._tvcal._tcp.local.",
+                                    addresses=[socket.inet_aton(ip)], port=port,
+                                    properties={"ip": ip, "port": str(port), "host": host},
+                                    server=f"{host}.")
+            self.zc = Zeroconf()
+            self.zc.register_service(self.info)
+            self.kind = "zeroconf"
+        except Exception as e:                    # never let advertising stop the app
+            print("Couldn't advertise on the network (zeroconf):", e)
+            self._close_zc()
+            self.kind = None
+
+    def _close_zc(self):
+        zc, info = self.zc, self.info
+        self.zc = self.info = None
+        if zc:
+            try:
+                if info:
+                    zc.unregister_service(info)
+            except Exception:
+                pass
+            try:
+                zc.close()
+            except Exception:
+                pass
 
     def stop(self):
         if self.proc:
             self.proc.terminate()
             self.proc = None
+        self._close_zc()
 
     def watch(self, port):
-        """If the Mac moves to another network, advertise the new address."""
+        """If the computer moves to another network, advertise the new address."""
         last = lan_ip()
         while True:
             time.sleep(10)
@@ -500,7 +604,7 @@ class Bonjour:
 BONJOUR = Bonjour()
 
 
-# ---- the iPhone camera as a meter
+# ---- the phone camera as a meter
 
 SIM_TV = None                     # demo mode: the simulated TV being measured
 SIM_CAM = [[0.020, 0.010, 0.002], [0.006, 0.026, 0.004], [0.001, 0.004, 0.030]]   # pretend sensor response
@@ -523,7 +627,7 @@ def sim_camera_reading():
 
 
 class PhoneMeter:
-    """Same interface as SpotreadMeter, but the reading comes from the iPhone camera,
+    """Same interface as SpotreadMeter, but the reading comes from the phone camera,
     converted to XYZ with the bridge matrix learned against the Display Plus HL."""
 
     def __init__(self, M, camera=None):
@@ -548,9 +652,9 @@ class PhoneMeter:
             return t0, self.now(), None
         diffs = settings_mismatch(self.camera, cam_settings(r))
         if diffs:
-            raise RuntimeError("The iPhone camera is running with different settings than its profile was "
-                               f"trained with ({'; '.join(diffs)}). This usually follows an iOS update. Train the "
-                               "camera again (Camera profiles page: remove the old sessions first).")
+            raise RuntimeError("The phone camera is running with different settings than its profile was "
+                               f"trained with ({'; '.join(diffs)}). This usually follows {os_update(PHONE.model)}. "
+                               "Train the camera again (Camera profiles page: remove the old sessions first).")
         return t0, self.now(), tuple(T.matvec(self.M, r["rgb"]))
 
 
@@ -561,12 +665,15 @@ PROFILE_DIR = os.path.join(APP_DIR, "Camera profiles")
 def load_profiles():
     os.makedirs(APP_DIR, exist_ok=True)
     if os.path.exists(PROFILES):
-        with open(PROFILES) as f:
+        with T.io_lock(), open(PROFILES) as f:
             return json.load(f)
     return {}
 
 
 def save_profiles(p):
+    if WINDOWS:                       # swapped in whole, so a reader never sees half a file
+        T.write_json_atomic(PROFILES, p)
+        return
     with open(PROFILES, "w") as f:
         json.dump(p, f, indent=1)
 
@@ -637,7 +744,7 @@ def _des2(M, Mn, pairs):
 
 
 def refit_profile(prof):
-    """This iPhone model's conversions from every training session: one per kind of screen (a TV's panel
+    """This phone model's conversions from every training session: one per kind of screen (a TV's panel
     type, set on the Train page), plus a general one for screens of an unknown kind. Screens make white
     from different mixes of light, so one conversion can't serve them all (an iPhone trained on a quantum
     dot mini-LED read a micro RGB TV about 11 dE off). Each TV counts equally, however many sessions it
@@ -720,7 +827,8 @@ def panel_matrix(prof, tv):
     return ((prof or {})["M"], None) if (prof or {}).get("M") else None
 
 
-CAM_KEYS = ("iso", "format", "lens", "aperture")   # aperture: iPhone 18 Pro variable aperture
+CAM_KEYS = ("iso", "format", "lens", "aperture")   # aperture: iPhone 18 Pro variable aperture; omitted
+#                                                     on fixed-aperture lenses (most phones)
 
 
 def cam_settings(reading):
@@ -833,6 +941,9 @@ class MeterHub:
             return None
         if self.meter is None or (self.meter.mode == "persistent" and
                                   (self.meter.proc is None or self.meter.proc.poll() is not None)):
+            if not shutil.which("spotread"):
+                # a RuntimeError, so the job that asked ends with this message (not a silent hang)
+                raise T.MeterError("ArgyllCMS isn't installed (spotread not found). " + T.install_hint())
             args = load_settings().get("spotread_args", "-y n").split()
             self.meter = T.SpotreadMeter(args)
         return self.meter
@@ -892,10 +1003,10 @@ TRAINING_DIR = os.path.join(APP_DIR, "Training")
 
 
 def run_bridge(name, check=False, signal="sdr"):
-    """Teach iPhone cameras on one TV: the meter and every connected phone measure the same patches.
+    """Teach phone cameras on one TV: the meter and every connected phone measure the same patches.
     Each phone's readings go into the profile for its model. check=True measures the same way but only
     scores each phone's existing profile against the meter: nothing is added (a true test, e.g. after an
-    app or iOS update, or on a new TV)."""
+    app or iOS/Android update, or on a new TV)."""
     global SIM_TV
     JOB.reset()
     JOB.phase, JOB.tv, JOB.hdr, JOB.started, JOB.kind = "measuring", name, False, time.time(), "bridge"
@@ -905,17 +1016,18 @@ def run_bridge(name, check=False, signal="sdr"):
     profs = load_profiles()
     devs = []
     for i, ph in enumerate(training_phones()):
-        model = ph.model or ("iPhone (demo)" if SIM else "iPhone")
+        model = ph.model or ("iPhone (demo)" if SIM else DEFAULT_PHONE)
         prof = profs.get(model)
-        devs.append({"key": ph.token or f"demo{i}", "model": model, "label": model_label(model, prof), "phone": ph,
+        devs.append({"key": phone_key(ph.token) or f"demo{i}", "model": model, "label": model_label(model, prof, ph.name),
+                     "name": ph.name, "phone": ph,
                      "pairs": [], "rows": [], "cam": {}, "M": panel_matrix(prof, name) if check else None})
     JOB.phones = [{"key": d["key"], "model": d["model"], "label": d["label"], "skip": bool(check and not d["M"])}
                   for d in devs]
     if not devs:
-        JOB.phase, JOB.error = "error", "No iPhone with its camera running."
+        JOB.phase, JOB.error = "error", "No phone with its camera running."
         return
     if check and not any(d["M"] for d in devs):
-        JOB.phase, JOB.error = "error", "None of the connected iPhones has a trained profile to check."
+        JOB.phase, JOB.error = "error", "None of the connected phones has a trained profile to check."
         return
     seq = {p["id"]: p for p in T.build_sequence(False)["patches"]}
     direct = SIM or (PHONE.connected() and PHONE.external)
@@ -948,16 +1060,52 @@ def run_bridge(name, check=False, signal="sdr"):
                 return abs(Xb[1] / Y - 1) <= 0.03 + 0.15 / Y and \
                     math.dist(T.xyz_to_xy(*Xa), T.xyz_to_xy(*Xb)) <= 0.004 + 0.03 / Y
 
+            def drop(d, why):
+                """Leave a phone out of the rest of this run (it stopped answering) instead of failing it."""
+                if d.get("gone"):
+                    return
+                d["gone"] = True
+                for q in JOB.phones:
+                    if q["key"] == d["key"]:
+                        q["gone"] = True
+                JOB.skips.append({"t": round(time.time() - JOB.started, 1), "Y": None, "x": None, "y": None,
+                                  "why": f"{d['label']} {why}, so it was left out of the rest of this run"})
+
+            def drop_gone():
+                for d in devs:
+                    ph = d["phone"]
+                    if ph.token and not ph.connected():
+                        drop(d, "stopped polling (its lab app was closed or the screen went off)")
+
+            def show(p):
+                """Put the patch on the TV through the pattern phone. If that phone had already stopped (it
+                closed its lab app just before Start), drop it and use the next one."""
+                while True:
+                    ph = PHONE._pick()
+                    try:
+                        ph.show_patch(p, mode="sdr")
+                        return
+                    except RuntimeError:
+                        if ph.connected() or not connected_phones():
+                            raise                         # still polling, or no phone left: a real failure
+                        for d in devs:
+                            if d["phone"] is ph:
+                                drop(d, "stopped responding")
+
             def take(label, X1):
                 """Every phone reads the patch at once. As each phone's reading arrives, the meter reads
                 again: that phone's reading counts if the picture hasn't changed. A slow phone can miss a
                 patch without the others losing it."""
-                asked = [(d, d["phone"].ask()) for d in devs if not (check and not d["M"])]
+                drop_gone()
+                asked = [(d, d["phone"].ask()) for d in devs if not (check and not d["M"]) and not d.get("gone")]
                 got = {}
                 deadline = time.time() + 25
                 while len(got) < len(asked) and time.time() < deadline:
                     ready = [(d, n) for d, n in asked if d["key"] not in got and d["phone"].has(n)]
                     if not ready:
+                        if all(d["key"] in got or (d["phone"].token and not d["phone"].connected())
+                               for d, n in asked):
+                            break                       # the rest stopped polling: don't wait 25 s for them
                         time.sleep(0.05)
                         continue
                     X2 = hl_read(1)
@@ -1012,7 +1160,7 @@ def run_bridge(name, check=False, signal="sdr"):
                     if JOB.cancel.is_set():
                         raise T.Cancelled()
                     JOB.index = i
-                    PHONE.show_patch(seq[pid], mode="sdr")
+                    show(seq[pid])
                     time.sleep(1.2)
                     take(seq[pid]["name"], hl_read(2))
                 PHONE.set({"kind": "black"})
@@ -1080,6 +1228,8 @@ def run_bridge(name, check=False, signal="sdr"):
             try:
                 if check and not d["M"]:
                     raise RuntimeError("No trained profile for this model yet: train it first.")
+                if d.get("gone") and len(d["pairs"]) < 6:
+                    raise RuntimeError("It stopped answering during this run, so it was left out.")
                 if len(d["pairs"]) < 6:
                     raise RuntimeError(f"Only {len(d['pairs'])} readings. Check that its yellow box sits inside "
                                        "the patch and its camera is running.")
@@ -1089,17 +1239,24 @@ def run_bridge(name, check=False, signal="sdr"):
                     res["settings"] = settings_mismatch(prof.get("camera"), d["cam"])
                     note = ", check only: profile unchanged"
                 else:
-                    prof = profs.setdefault(d["model"], {"name": MODEL_NAMES.get(d["model"], ""), "sessions": []})
+                    prof = profs.setdefault(d["model"], {"name": MODEL_NAMES.get(d["model"]) or d["name"] or "",
+                                                         "sessions": []})
+                    if not prof.get("name") and not is_iphone(d["model"]) and d["name"]:
+                        prof["name"] = d["name"]           # an Android profile made before names were sent
                     diffs = settings_mismatch(prof.get("camera"), d["cam"])
                     if diffs and prof.get("sessions"):
                         raise RuntimeError("This phone ran with different camera settings than its existing "
-                                           f"profile ({'; '.join(diffs)}), so it wasn't mixed in. If iOS changed "
+                                           f"profile ({'; '.join(diffs)}), so it wasn't mixed in. If "
+                                           f"{'iOS' if is_iphone(d['model']) else 'a system update'} changed "
                                            "the camera, remove the old sessions on the Camera profiles page and "
                                            "train again.")
                     if d["cam"] and not prof.get("camera"):
                         prof["camera"] = d["cam"]
-                    prof["sessions"].append({"tv": name, "date": datetime.now().isoformat(timespec="minutes"),
-                                             "signal": signal, "panel": panel, "camera": d["cam"],
+                    sess = {"tv": name, "date": datetime.now().isoformat(timespec="minutes"),
+                            "signal": signal, "panel": panel, "camera": d["cam"]}
+                    if dev_os(d):
+                        sess["os"] = dev_os(d)                 # e.g. "Android 16": which build trained it
+                    prof["sessions"].append({**sess,
                                              "pairs": [[list(c), list(X)] for c, X in d["pairs"]],
                                              "names": [JOB.pairs[i]["name"] for i in d["rows"]]})
                     refit_profile(prof)
@@ -1152,10 +1309,14 @@ def save_training(name, check, devs, meter_xyz):
         os.makedirs(TRAINING_DIR, exist_ok=True)
         safe = re.sub(r"[^A-Za-z0-9 _-]+", "_", name).strip() or "TV"
         sig = " HDR10" if getattr(JOB, "signal", "sdr") == "hdr10" else ""
-        fn = os.path.join(TRAINING_DIR, f"{datetime.now():%Y-%m-%d %H%M} {safe}{sig}{' check' if check else ''}.json")
+        base = os.path.join(TRAINING_DIR, f"{datetime.now():%Y-%m-%d %H%M} {safe}{sig}{' check' if check else ''}")
+        fn, n = base + ".json", 2
+        while os.path.exists(fn):                 # another run in the same minute: keep both
+            fn, n = f"{base} ({n}).json", n + 1
         data = {"tv": name, "date": datetime.now().isoformat(timespec="seconds"), "check": check,
                 "signal": getattr(JOB, "signal", "sdr"), "panel": tv_panels().get(name),
-                "phones": {d["key"]: {"model": d["model"], "label": d["label"], "camera": d["cam"]} for d in devs},
+                "phones": {d["key"]: {"model": d["model"], "label": d["label"], "camera": d["cam"],
+                                      **({"os": dev_os(d)} if dev_os(d) else {})} for d in devs},
                 "skipped": JOB.skips,
                 "patches": [{"name": r["name"], "XYZ": X,
                              "phones": {k: v.get("rgb") for k, v in r["phones"].items() if v.get("ok")}}
@@ -1205,7 +1366,7 @@ def run_job(name, hdr, source="video", meter_kind="hl"):
             if meter_kind == "iphone":
                 prof = profile_for(PHONE.model)
                 if not prof:
-                    raise RuntimeError("Train the iPhone camera first (on any TV).")
+                    raise RuntimeError("Train the phone camera first (on any TV).")
                 meter = PhoneMeter(prof["M"], prof.get("camera"))
             if source == "iphone":
                 try:
@@ -1234,7 +1395,7 @@ def run_job(name, hdr, source="video", meter_kind="hl"):
         JOB.phase = "done"
     except T.Cancelled:
         JOB.phase = "cancelled"
-    except T.NoSync as e:
+    except (T.NoSync, T.MeterError) as e:
         JOB.phase, JOB.error = "error", str(e)
     except Exception as e:  # show anything else in the app instead of dying silently
         JOB.phase, JOB.error = "error", f"{type(e).__name__}: {e}"
@@ -1266,7 +1427,7 @@ def guide_state(name, mode):
     path = T.state_path(guide_key(name, mode), MODES[mode])
     st = None
     if os.path.exists(path):
-        with open(path) as f:
+        with T.io_lock(), open(path) as f:
             st = json.load(f)
     if not st or st.get("version", 1) < T.STATE_VERSION:
         st = {"version": T.STATE_VERSION, "rounds": [], "sens": {}}
@@ -1842,6 +2003,7 @@ class Live:
         self.data = None
         self.hdr = False
         self.thread = None
+        self.error = None
 
     def start(self, hdr):
         self.hdr = hdr
@@ -1862,16 +2024,22 @@ class Live:
             if JOB.phase in ("starting", "waiting", "measuring"):
                 time.sleep(0.5)
                 continue
-            with LOCK:
-                if SIM:
-                    p = pats[(i // 6) % len(pats)]
-                    i += 1
-                    XYZ = sim_tv.render(p)
-                    XYZ = tuple(v * (1 + random.gauss(0, 0.002)) for v in XYZ)
-                    time.sleep(0.5)
-                else:
-                    meter = HUB.get()
-                    t0, t1, XYZ = meter.read()
+            try:
+                with LOCK:
+                    if SIM:
+                        p = pats[(i // 6) % len(pats)]
+                        i += 1
+                        XYZ = sim_tv.render(p)
+                        XYZ = tuple(v * (1 + random.gauss(0, 0.002)) for v in XYZ)
+                        time.sleep(0.5)
+                    else:
+                        meter = HUB.get()
+                        t0, t1, XYZ = meter.read()
+                self.error = None
+            except Exception as e:            # e.g. no spotread: say so and keep trying, don't die
+                self.error = str(e)
+                time.sleep(2)
+                continue
             if XYZ:
                 self.data = live_analysis(XYZ, self.hdr)
                 self.data["t"] = time.time()
@@ -1911,22 +2079,28 @@ def meter_check():
     path = shutil.which("spotread")
     if not path:
         return {"steps": [{"ok": False, "text": "ArgyllCMS isn't installed (spotread not found). "
-                                                 "Install it with: brew install argyll-cms"}]}
+                                                 + T.install_hint()}]}
     steps.append({"ok": True, "text": f"ArgyllCMS found ({path})."})
-    env = dict(os.environ)
-    env.setdefault("ARGYLL_EXCLUDE_SERIAL_SCAN",
-                   "/dev/cu.Bluetooth-Incoming-Port;/dev/tty.Bluetooth-Incoming-Port;/dev/cu.debug-console")
     try:
-        out = subprocess.run(["spotread", "-?"], capture_output=True, text=True, timeout=30, env=env)
-        ports = re.findall(r"^\s*(\d+)\s*=\s*'([^']+)'", out.stdout + out.stderr, re.M)
+        ports = T.spotread_ports()
     except subprocess.TimeoutExpired:
         ports = []
-    meters = [d for n, d in ports if not d.startswith("/dev/")]
+        if WINDOWS:
+            steps.append({"ok": False, "text": "spotread froze while looking for meters. If this PC has Bluetooth "
+                                               "COM ports, set ARGYLL_EXCLUDE_SERIAL_SCAN to them (e.g. COM5;COM6)."})
+    except OSError as e:
+        ports = []
+        steps.append({"ok": False, "text": f"spotread didn't start: {e}"})
+    found = [(n, d) for n, d in ports if T.is_meter_port(d)]       # serial ports (/dev/..., COMn) aren't meters
+    meters = [d for n, d in found]
     if not meters:
-        steps.append({"ok": False, "text": "No meter found. Unplug and replug it straight into the Mac, "
-                                           "and quit Calibrite PROFILER."})
+        steps.append({"ok": False, "text": "No meter found. " + T.no_meter_hint(COMPUTER)})
         return {"steps": steps}
-    steps.append({"ok": True, "text": f"Meter found: {meters[0]}."})
+    args = load_settings().get("spotread_args", "-y n").split()
+    if WINDOWS and found[0][0] != "1" and not T._has_port_arg(args):
+        steps.append({"ok": True, "text": f"Meter found: {meters[0]} (port {found[0][0]}, used automatically)."})
+    else:
+        steps.append({"ok": True, "text": f"Meter found: {meters[0]}."})
     with LOCK:
         meter = HUB.get()
         times, ys = [], []
@@ -2025,6 +2199,8 @@ class Handler(BaseHTTPRequestHandler):
             ph.ext_name = qs.get("extname", "")
             ph.cam_ready = qs.get("cam") == "1"
             ph.model = qs.get("model", ph.model)
+            ph.name = qs.get("name", ph.name)[:60]               # optional marketing name (Android sends it)
+            phone_os_from(ph, qs)
             return self._send(200, {"seq": ph.seq, "pattern": ph.pattern, "measure": ph.mseq})
         if u.path == "/api/profiles":
             return self._send(200, {"profiles": [profile_summary(p, m) for m, p in load_profiles().items()],
@@ -2055,7 +2231,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/job":
             return self._send(200, JOB.view())
         if u.path == "/api/live":
-            return self._send(200, {"on": LIVE.on, "data": LIVE.data})
+            return self._send(200, {"on": LIVE.on, "data": LIVE.data, "error": LIVE.error})
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -2070,12 +2246,19 @@ class Handler(BaseHTTPRequestHandler):
                 PHONE.bad_codes += 1
                 if PHONE.bad_codes >= 8:                      # too many guesses: new code
                     PAIR_CODE, PHONE.bad_codes = f"{secrets.randbelow(10000):04d}", 0
-                return self._send(403, {"error": "That code doesn't match. Check the code shown in TV Calibrator on the Mac."})
+                return self._send(403, {"error": f"That code doesn't match. Check the code shown in TV Calibrator on the {COMPUTER}."})
             tok = secrets.token_hex(16)
             s = load_settings()
-            s.setdefault("phones", {})[tok] = {"device": b.get("device", "iPhone"),
+            s.setdefault("phones", {})[tok] = {"device": str(b.get("device", DEFAULT_PHONE))[:80],
                                                "paired": datetime.now().isoformat(timespec="seconds")}
+            for k in ("model", "name", "android", "ios"):          # optional, for the records
+                if b.get(k):
+                    s["phones"][tok][k] = str(b[k])[:80]
             save_settings(s)
+            ph = phone_for(tok)                                  # what it sent, until its first poll/reading
+            if b.get("name"):
+                ph.name = str(b["name"])[:60]
+            phone_os_from(ph, b)
             return self._send(200, {"token": tok, "mac": socket.gethostname().split(".")[0]})
         if not self._authed(qs):
             return self._send(403, {"error": "Pair this device first."})
@@ -2084,7 +2267,11 @@ class Handler(BaseHTTPRequestHandler):
                 f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {b.get('model', '')}  {str(b.get('line', ''))[:500]}\n")
             return self._send(200, {"ok": True})
         if u.path == "/api/phone/reading":
-            phone_for(self._token(qs)).deliver(int(b.get("seq", 0)), b)
+            ph = phone_for(self._token(qs))
+            if b.get("name"):
+                ph.name = str(b["name"])[:60]
+            phone_os_from(ph, b)
+            ph.deliver(int(b.get("seq", 0)), b)
             return self._send(200, {"ok": True})
         if u.path == "/api/bridge/start":
             if JOB.phase in ("starting", "waiting", "measuring"):
@@ -2092,7 +2279,7 @@ class Handler(BaseHTTPRequestHandler):
             if not tv_panels().get(b.get("name")):
                 return self._send(409, {"error": "Choose what kind of screen this TV is first."})
             if not training_phones():
-                return self._send(409, {"error": "Start the camera in TV Cal Lab on at least one iPhone first "
+                return self._send(409, {"error": "Start the camera in TV Cal Lab on at least one phone first "
                                                  "(Lab mode: Start the camera, then measure the darkness)."})
             sig = "hdr10" if b.get("signal") == "hdr10" else "sdr"
             threading.Thread(target=run_bridge, args=(b["name"], bool(b.get("check")), sig), daemon=True).start()
@@ -2120,9 +2307,10 @@ class Handler(BaseHTTPRequestHandler):
             if not p:
                 return self._send(404, {"error": "No such profile."})
             os.makedirs(PROFILE_DIR, exist_ok=True)
-            label = re.sub(r"[^A-Za-z0-9 _,()-]+", "_", p.get("name") or b["model"])
+            label = re.sub(r"[^A-Za-z0-9 _,()+-]+", "_", p.get("name") or model_file_name(b["model"])).strip(" .") \
+                or model_file_name(b["model"])
             fn = os.path.join(PROFILE_DIR, f"{label} camera profile.json")
-            with open(fn, "w") as f:
+            with open(fn, "w", encoding="utf-8") as f:
                 json.dump({"tvcal_camera_profile": 1, "model": b["model"], **p}, f, indent=1)
             if self._local():
                 reveal(fn)
@@ -2254,9 +2442,9 @@ class Handler(BaseHTTPRequestHandler):
             meter_kind = b.get("meter", "hl")
             if meter_kind == "iphone":
                 if not profile_for(PHONE.model):
-                    return self._send(409, {"error": "Train the iPhone camera first (on any TV)."})
+                    return self._send(409, {"error": "Train the phone camera first (on any TV)."})
                 if not SIM and not (PHONE.connected() and PHONE.cam_ready):
-                    return self._send(409, {"error": "Start the camera in TV Calibrator on the iPhone first."})
+                    return self._send(409, {"error": "Start the camera in TV Calibrator on the phone first."})
             threading.Thread(target=run_job, args=(b["name"], bool(b.get("hdr")), source, meter_kind),
                              daemon=True).start()
             return self._send(200, {"ok": True})
@@ -2327,6 +2515,16 @@ def shutdown():
 
 def port_in_use(port):
     """True if something holds the port - including a stuck program that never accepts."""
+    if WINDOWS:
+        # Windows takes about 2 s to refuse a connection to a closed local port, so try to take the port
+        # instead (exclusively, the way the server does): that answers at once.
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                s.bind(("0.0.0.0", port))
+                return False
+            except OSError:
+                return True
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1.0)
         try:
@@ -2363,17 +2561,58 @@ def running_instance(port):
         return None
 
 
+def _command_line(pid):
+    """A process's command line ("" if unknown)."""
+    if not WINDOWS:
+        return subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+    try:
+        import psutil                                   # optional
+        return " ".join(psutil.Process(pid).cmdline())
+    except ImportError:
+        pass
+    except Exception:
+        return ""
+    try:
+        return subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                               f"(Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}').CommandLine"],
+                              capture_output=True, text=True, errors="replace", timeout=20, **_NO_WINDOW).stdout
+    except subprocess.TimeoutExpired:
+        return ""
+
+
 def _is_tvcal(pid):
     try:
-        cmd = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+        cmd = _command_line(pid)
         return "tvcal_app.py" in cmd
     except OSError:
         return False
 
 
-def stop_old_instance(port, info):
-    """Stop an older or stuck copy of TV Calibrator so this one can start."""
-    import signal
+def listening_pids(port):
+    """The processes listening on a TCP port (macOS: lsof; Windows: netstat)."""
+    pids = set()
+    try:
+        if WINDOWS:
+            out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True,
+                                 errors="replace", timeout=20, **_NO_WINDOW).stdout
+            for line in out.splitlines():
+                f = line.split()
+                # "TCP  0.0.0.0:8765  0.0.0.0:0  LISTENING  1234"; the state word is translated on
+                # non-English Windows, but a listening socket's remote address always ends in ":0"
+                if len(f) >= 5 and f[0].upper().startswith("TCP") and f[1].rsplit(":", 1)[-1] == str(port) \
+                        and f[2].endswith(":0") and f[-1].isdigit():
+                    pids.add(int(f[-1]))
+        else:
+            out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
+            pids.update(int(x) for x in out.split())
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    pids.discard(0)
+    return pids
+
+
+def old_instance_pids(port, info, listening=None):
+    """The processes of an older or stuck copy of TV Calibrator on the port (empty if it's another program)."""
     pids = set()
     if info and info.get("pid"):
         pids.add(int(info["pid"]))
@@ -2382,13 +2621,19 @@ def stop_old_instance(port, info):
             pids.add(int(f.read().strip()))
     except (OSError, ValueError):
         pass
-    try:   # whatever is listening on the port, if it's one of ours
-        out = subprocess.run(["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"], capture_output=True, text=True).stdout
-        pids.update(int(x) for x in out.split())
-    except (OSError, ValueError):
-        pass
-    pids = {p for p in pids if p != os.getpid() and _is_tvcal(p)}
-    for sig in (signal.SIGTERM, signal.SIGKILL):
+    pids |= listening_pids(port) if listening is None else listening   # whatever listens, if it's ours
+    return {p for p in pids if p != os.getpid() and _is_tvcal(p)}
+
+
+def stop_old_instance(port, info, pids=None):
+    """Stop an older or stuck copy of TV Calibrator so this one can start."""
+    import signal
+    if pids is None:
+        pids = old_instance_pids(port, info)
+    if not pids:
+        return not port_in_use(port)    # nothing of ours to stop: don't wait for a port that won't free up
+    # Windows has no SIGKILL; os.kill(pid, SIGTERM) already ends the process there (TerminateProcess)
+    for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
         for p in pids:
             try:
                 os.kill(p, sig)
@@ -2402,7 +2647,7 @@ def stop_old_instance(port, info):
 
 
 def idle_watchdog():
-    """Nobody has had the page open (and no iPhone has talked to it) for a while: quit, so old
+    """Nobody has had the page open (and no phone has talked to it) for a while: quit, so old
     copies don't pile up in the background."""
     while True:
         time.sleep(30)
@@ -2411,6 +2656,24 @@ def idle_watchdog():
             print("No one has used TV Calibrator for a while - stopping.")
             shutdown()
             return
+
+
+class Server(ThreadingHTTPServer):
+    """On Windows, SO_REUSEADDR would let a second program bind the same port (another server already on
+    8765, or a second copy of this one) and both would half-work. Take the port exclusively instead."""
+    allow_reuse_address = not WINDOWS
+    daemon_threads = True
+
+    def server_bind(self):
+        if WINDOWS and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def free_port_hint(port):
+    """", or start with --port N." naming a port that is free right now ("." if none nearby is)."""
+    free = next((p for p in range(port + 1, port + 50) if not port_in_use(p)), None)
+    return f", or start with --port {free}." if free else "."
 
 
 def main():
@@ -2429,16 +2692,24 @@ def main():
             if not a.no_browser:
                 webbrowser.open(url)
             return
-        why = ("an older version" if info.get("version") != APP_VERSION else "a copy whose files have moved") \
-            if info else "a copy that isn't responding"
-        print(f"Stopping {why} of TV Calibrator...")
-        if not stop_old_instance(a.port, info):
-            print(f"Port {a.port} is used by another program. Close it, or start with --port 8766.")
-            return
+        listening = listening_pids(a.port)
+        pids = old_instance_pids(a.port, info, listening)
+        if info or pids:
+            why = ("an older version of TV Calibrator" if info.get("version") != APP_VERSION else
+                   "a copy of TV Calibrator whose files have moved") if info else \
+                "a copy of TV Calibrator that isn't responding"
+            print(f"Stopping {why}...")
+        if not stop_old_instance(a.port, info, pids):
+            who = f" (process {', '.join(map(str, sorted(listening)))})" if listening else ""
+            print(f"Port {a.port} is used by another program{who}. Close it" + free_port_hint(a.port))
+            sys.exit(1)
     PORT = a.port
     page_html()                      # load the page now, while the app's files are certainly there
-    SERVER = ThreadingHTTPServer(("0.0.0.0", a.port), Handler)
-    SERVER.daemon_threads = True
+    try:
+        SERVER = Server(("0.0.0.0", a.port), Handler)
+    except OSError as e:
+        print(f"Couldn't use port {a.port} ({e}). Close the program using it" + free_port_hint(a.port))
+        sys.exit(1)
     try:
         os.makedirs(os.path.dirname(PID_FILE), exist_ok=True)
         with open(PID_FILE.format(port=a.port), "w") as f:
@@ -2451,6 +2722,12 @@ def main():
     BONJOUR.start(a.port)
     threading.Thread(target=BONJOUR.watch, args=(a.port,), daemon=True).start()
     print(f"TV Calibrator running at {url}" + ("  (demo mode)" if SIM else ""))
+    if BONJOUR.kind is None:
+        print(f"Phones won't find this {COMPUTER} by themselves (no Bonjour / zeroconf). In the phone's lab app, "
+              f"enter {lan_ip()}:{a.port} and the pairing code {PAIR_CODE}.")
+    if WINDOWS:
+        print("If a phone can't connect: allow Python through Windows Defender Firewall on Private networks, "
+              "and set this Wi-Fi network to Private.")
     print("Quit from the app's sidebar, or press Control-C here.")
     if not a.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
@@ -2464,8 +2741,9 @@ def main():
         BONJOUR.stop()
         try:
             with open(PID_FILE.format(port=PORT)) as f:
-                if f.read().strip() == str(os.getpid()):
-                    os.remove(PID_FILE.format(port=PORT))
+                ours = f.read().strip() == str(os.getpid())
+            if ours:                       # removed after closing it: Windows can't delete an open file
+                os.remove(PID_FILE.format(port=PORT))
         except OSError:
             pass
         print("TV Calibrator stopped.")

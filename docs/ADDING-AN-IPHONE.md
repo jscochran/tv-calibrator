@@ -47,11 +47,15 @@ The Train phone profiles page lists every connected phone and whether its camera
    each aimed at a different spot of the big centre patch around the meter (not at the meter). Each
    phone's yellow box must sit fully inside the patch.
 2. On the Mac, choose the TV and click **Train the profiles**.
-3. Play **Lab - Camera training (SDR)** on the TV from the start (export it from the SDR video
-   studio; it isn't on YouTube). It has 46 patches of 12 seconds, each a band across the full width of the
+3. Play **Lab - Camera training (SDR).mp4** on the TV from the start (make it with
+   `python3 tools/make_sdr_training.py <usb drive>`, on the Mac or the Windows lab PC, and play it from a
+   USB stick; it isn't on YouTube). It has 46 patches of 12 seconds, each a band across the full width of the
    screen: greys, colours at three levels, tinted greys, skin tones and mixed colours. Each new patch is measured by the meter and every phone
    at once.
 4. The Mac finishes about 45 seconds after the video ends (or click **Finish now**).
+
+If a phone stops answering during the run (its lab app closed, or its screen went off), it's left out
+of the rest of the run and the others carry on.
 
 The Mac then shows, for each phone, how closely it matched the meter on this TV, and a table of every
 patch as the meter measured it and as each phone reads it. All the raw readings are saved in
@@ -85,7 +89,7 @@ each phone get their own spot.
    time they open the app, with no App Store update. Commit and push `server/` too, so the repo has
    the profile's history.
 
-   The script also copies every published profile into the app
+   The script also copies every published iPhone profile into the app
    (`TV Calibrator/Resources/builtin-profiles.json`), so the next App Store build has it built in.
    That file also names the **standard profile** used by iPhones that have none of their own; change
    it with `--standard <model>`. You can also pass the Mac app's whole `~/tvcal/camera_profiles.json`
@@ -93,6 +97,13 @@ each phone get their own spot.
 
 `build_catalog.py` refuses a profile whose estimated error on unseen TVs is above dE 3. If you
 retrain a model, it gets a new version number automatically.
+
+**Android phones** are published with the same script and share `server/index.json`. Any model
+that doesn't start with `iPhone` (e.g. `samsung/e2q`) counts as Android. It is saved as
+`server/profiles/samsung_e2q-v1.json` and goes only into the Android app's built-in file
+(`android/app/src/main/assets/builtin-profiles.json`), so the iPhone app never gets an Android
+profile or an Android standard profile, and the Android app never gets an iPhone one. See
+[android/README.md](../android/README.md#publishing-a-profile).
 
 ## Notes
 

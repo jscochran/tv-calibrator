@@ -42,6 +42,59 @@ Kotlin rounds and formats numbers differently from Swift and Python. The port us
 `Basics.kt` (`pyRound`, `swiftRounded`, `swiftMin`/`swiftMax`, `cfmt`, `gfmt`) wherever results or
 text must match exactly. Use them, not `round()` or `String.format`.
 
+## Training videos
+
+Profile training plays a lab video on the TV while the lab tool follows it with the meter: whenever
+the meter sees a new, steady patch (over 0.5 cd/m², 8% brighter or dimmer or 0.006 away in x, y),
+the meter and every connected phone measure it. There are no sync flashes, and no patch list to match.
+The tool stops 45 s after the last patch. Make both videos with ffmpeg on PATH (Python standard library
+only), then play them from a USB stick:
+
+```powershell
+python tools\make_sdr_training.py D:\        # "Lab - Camera training (SDR).mp4", about 1.5 MB, 10 min 22 s
+python tools\make_hdr_training.py D:\        # "Lab - Camera training (HDR10).mp4", about 4 MB, 12 min 40 s
+```
+
+| | SDR (`make_sdr_training.py`) | HDR10 (`make_hdr_training.py`) |
+|---|---|---|
+| Format | 1920×1080, 24p, H.264 High 4.0, 8-bit 4:2:0, BT.709 primaries/transfer/matrix, limited range | 1920×1080, 24p, HEVC Main 10, BT.2020, PQ, limited range, mastering display P3 D65 1000 nits, MaxCLL 1000/400 |
+| Timeline | 10 s black, 46 patches × 12 s, 60 s black | 10 s black, 46 patches × 15 s, 60 s black |
+| Patches | 11 greys (15–100%), red/green/blue/cyan/magenta/yellow at 100, 75 and 50%, 6 tinted greys at 75% + 3 at 40%, orange, light and dark skin, purple, sky, lime, pink, teal | 11 greys (10–1000 nits), the six colours in P3 at 100 and 300-nit white and in Rec.709 at 100, 9 tinted greys, the same 8 mixed colours |
+
+Each patch is a band across the full width of the screen (rows 180–900) on black, so the meter and
+each phone can aim at their own spot. Greys and colours alternate so that each patch differs clearly from
+the one before. Each script also writes `… patches.txt` with the start time, signal, Y, x, y and codes of every
+patch. `make_sdr_training.py` replaces the export from the Mac app's SDR video studio. `--list` writes
+only the patch list.
+
+**Newer ffmpeg (seen with 9.0):** if the raw input has no colour tags, ffmpeg assumes BT.601 and converts it to the
+output's tags. `make_sdr_training.py` tags its input, and its colour patches decode to the exact codes.
+`make_hdr_training.py` doesn't yet: with ffmpeg 9, greys stay exact but colour patches decode a few
+codes off (for example P3 red is 322/380/619 instead of 318/374/628). Training still works because the meter
+and the phones measure the same light. Adding the same `-color_*` options before `-i` fixes it.
+
+## Publishing a profile
+
+Train the phone with the lab tool as in [../docs/ADDING-AN-IPHONE.md](../docs/ADDING-AN-IPHONE.md),
+using the lab build, then publish from the repo folder (an exported profile file works too):
+
+```powershell
+python tools\build_catalog.py "$env:USERPROFILE\tvcal\camera_profiles.json" `
+    --name "samsung/e2q=Galaxy S24+" --name "google/panther=Pixel 7" --standard samsung/e2q
+cd push-worker; npx wrangler deploy
+```
+
+- A model key that doesn't start with `iPhone` is an Android model (an export can also say
+  `"platform": "android"`). `samsung/e2q` is written to `server/profiles/samsung_e2q-v1.json`. The
+  profile's `model` field keeps the `/`. `server/index.json` is shared with the iPhone app.
+- Android models go only into `app/src/main/assets/builtin-profiles.json`, and iPhone models only
+  into the iPhone app's file. `--platform android` rewrites only the Android file. `--standard` sets
+  the profile that Android phones without their own fall back on. Pass it once per platform.
+- Profiles with an estimated error above dE 3 on unseen TVs are refused, as for iPhones.
+- If the script warns that a file doesn't match its SHA-256 because its line endings changed to
+  CRLF, git's `core.autocrlf` rewrote it. Don't deploy until that is fixed, or phones reject the file.
+- Self-test: `python tools\tests\test_build_catalog.py`.
+
 ## Roadmap
 
 | Phase | Work | Needs |

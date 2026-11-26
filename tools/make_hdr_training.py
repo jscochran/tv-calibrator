@@ -138,7 +138,12 @@ def segment(path, nits, seconds, work):
     with open(raw, "wb") as f:
         f.write(frame(nits))
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "yuv420p10le", "-s", f"{W}x{H}",
-                    "-r", str(FPS), "-stream_loop", "-1", "-i", raw, "-t", str(seconds),
+                    "-r", str(FPS),
+                    # Tag the raw input too: recent ffmpeg treats untagged rawvideo as BT.601 and converts
+                    # it, which shifts the colour patches' codes (greys are unaffected).
+                    "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc",
+                    "-color_range", "tv",
+                    "-stream_loop", "-1", "-i", raw, "-t", str(seconds),
                     "-c:v", "libx265", "-preset", "ultrafast", "-crf", "12", "-pix_fmt", "yuv420p10le",
                     "-x265-params", X265, "-tag:v", "hvc1",
                     "-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc",

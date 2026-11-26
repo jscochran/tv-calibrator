@@ -67,6 +67,7 @@ aside {
 .phone-status { font-size: 13px; color: var(--muted); padding: 0 8px; }
 .phone-status b { color: var(--text); font-weight: 500; }
 .phone-status .code { display: block; font-size: 26px; letter-spacing: .18em; color: var(--text); margin: 4px 0 2px; }
+.phone-status .addr { display: block; font-size: 17px; color: var(--text); margin: 2px 0; user-select: all; }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--faint); }
 .dot.on { background: var(--white); }
 .srcrow { display: flex; gap: 12px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
@@ -310,7 +311,7 @@ body.pro .pro-only { display: block; }
       </form>
     </div>
     <div class="side-group" id="phonegroup">
-      <h2>iPhone</h2>
+      <h2>Phones</h2>
       <div id="phone" class="phone-status">Checking…</div>
     </div>
     <div class="side-group">
@@ -352,25 +353,32 @@ let S = { tvs: [], sim: false, view: "tv", tv: null, hdr: false, data: null, job
           phone: null, source: localStorage.getItem("tvcal-source") || "video",
           meter: localStorage.getItem("tvcal-meter") || "hl" };
 
-/* ------------------------------------------------------------------ iPhone status */
+/* ------------------------------------------------------------------ phone status */
+// "Mac" on a Mac, "computer" elsewhere (the server says which).
+const comp = () => (S.phone && S.phone.computer) || ((navigator.platform || "").startsWith("Mac") ? "Mac" : "computer");
+// This computer's address on the network, for typing into a phone's lab app. Said plainly when the phones
+// can't find the computer by themselves (no Bonjour / zeroconf, e.g. on Windows).
+const addrHTML = p => `<span class="addr">${esc(p.ip)}:${esc(p.port)}</span>` +
+  (p.discovery ? "" : `<small>Phones won't find this ${esc(comp())} by themselves: enter this address in the lab app.</small>`);
 async function loadPhone() {
   try { S.phone = await api("/api/phone/status"); } catch (e) { return; }
   const pg = $("#phonegroup");
-  if (pg) pg.style.display = (S.patSource === "video" && !S.pro && !S.phone.connected) ? "none" : "";
+  // shown always when phones can't find this computer by themselves: they need the address in it
+  if (pg) pg.style.display = (S.patSource === "video" && !S.pro && !S.phone.connected && S.phone.discovery) ? "none" : "";
   const p = S.phone, el = $("#phone"); if (!el) return;
   const many = (p.phones || []).length > 1;
   if (many) {
-    el.innerHTML = `<span class="dot on"></span><b>${p.phones.length} iPhones</b> connected<br>` +
+    el.innerHTML = `<span class="dot on"></span><b>${p.phones.length} phones</b> connected<br>` +
       p.phones.map(q => `${esc(q.label)}: ${q.camera ? "camera ready" : "camera off"}`).join("<br>") +
-      `<br>To pair another, enter:<span class="code">${esc(p.code)}</span>This Mac: ${esc(p.ip)}:${esc(p.port)}`;
+      `<br>To pair another, enter:<span class="code">${esc(p.code)}</span>This ${esc(comp())}'s address:${addrHTML(p)}`;
   } else if (p.connected) {
-    el.innerHTML = `<span class="dot on"></span><b>${esc(p.device || "iPhone")}</b> connected<br>` +
+    el.innerHTML = `<span class="dot on"></span><b>${esc(p.device || p.label || "Phone")}</b> connected<br>` +
       (p.external ? `TV attached${p.ext_name ? ` (${esc(p.ext_name)})` : ""}.` : `Not showing patches on a TV.`) +
-      `<br>${p.camera ? "Camera ready to measure." : "Camera off."}<br>This Mac: ${esc(p.ip)}:${esc(p.port)}`;
+      `<br>${p.camera ? "Camera ready to measure." : "Camera off."}<br>This ${esc(comp())}'s address:${addrHTML(p)}`;
   } else {
-    el.innerHTML = `<span class="dot"></span>${p.paired ? "Paired, not connected." : "No iPhone paired."}
-      <br>To pair, open TV Calibrator on the iPhone and enter:<span class="code">${esc(p.code)}</span>
-      This Mac's address: <b>${esc(p.ip)}:${esc(p.port)}</b>`;
+    el.innerHTML = `<span class="dot"></span>${p.paired ? "Paired, not connected." : "No phone paired."}
+      <br>To pair, open TV Calibrator (TV Cal Lab) on the phone and enter:<span class="code">${esc(p.code)}</span>
+      This ${esc(comp())}'s address:${addrHTML(p)}`;
   }
   if (S.view === "train") renderTrainPhones();
   if (S.view === "auto" && S.data && !["starting", "waiting", "measuring"].includes((S.job || {}).phase)) { renderRun(currentPending()); renderCam(); }
@@ -908,15 +916,17 @@ async function showTrain() {
   if (!S.trainTV || !S.tvs.some(t => t.name === S.trainTV)) S.trainTV = (S.tvs[0] || {}).name || "";
   S._tkey = null;
   $("#main").innerHTML = `<div class="tvhead"><h1>Train phone profiles</h1></div>
-    <p class="empty" style="margin-top:-8px;max-width:76ch">Each iPhone model needs a camera profile: what its camera sees,
-    matched to what the Display Plus HL measures. Every connected iPhone trains at the same time, on the same patches,
+    <p class="empty" style="margin-top:-8px;max-width:76ch">Each phone model needs a camera profile: what its camera sees,
+    matched to what the Display Plus HL measures. Every connected phone trains at the same time, on the same patches,
     so you can also compare how the phones see the same colours. Train on two or more TVs (an OLED and an LCD) so the
     profiles work on TVs they haven't seen.</p>
-    <section class="sec"><h3>iPhones</h3><div id="tphones"></div></section>
+    <section class="sec"><h3>Phones</h3><div id="tphones"></div></section>
     <section class="sec"><h3>Set up</h3><ol class="steps-list">
       <li><b>On each iPhone:</b> install the <b>TV Calibrator Lab</b> build from Xcode. In the app, open Lab mode, pair with
         the code in the sidebar, then <b>Start the camera</b> and <b>measure the darkness</b> (lens covered).</li>
-      <li><b>The meter:</b> plug the Display Plus HL into this Mac and rest it on the centre of the TV.</li>
+      <li><b>On each Android phone:</b> install the <b>TV Cal Lab for Android</b> build (<code>android/</code>,
+        <code>assembleLabDebug</code>). Pair the same way; if it doesn't find this ${esc(comp())}, enter the address shown under Phones.</li>
+      <li><b>The meter:</b> plug the Display Plus HL into this ${esc(comp())} and rest it on the centre of the TV.</li>
       <li><b>The phones:</b> on stands, 15–30 cm from the screen, each aimed at a different spot of the big centre patch,
         around the meter but not at it. The phone's yellow box must sit fully inside the patch.</li>
       <li><b>The TV:</b> its most accurate SDR picture mode (Filmmaker, Cinema or Expert), with energy saving, dynamic
@@ -935,9 +945,9 @@ function renderTrainPhones() {
       <div class="phonecard ${q.camera ? "ready" : ""}"><b>${esc(q.label)}</b><span>${esc(q.model)}</span>
       <span>${q.camera ? "Camera ready" : "Camera off: start it in Lab mode"}</span>
       <span>${q.profile ? `Profile: ${q.profile.tvs.length} TV${q.profile.tvs.length === 1 ? "" : "s"} (${q.profile.tvs.map(esc).join(", ")})` : "No profile yet"}</span></div>`).join("")}</div>`
-    : `<p class="hint">No iPhone connected${S.sim ? " (the demo uses a pretend one)" : ""}.</p>`) +
+    : `<p class="hint">No phone connected${S.sim ? " (the demo uses a pretend one)" : ""}.</p>`) +
     `<p class="hint" style="margin-top:10px">To add a phone, open Lab mode in TV Cal Lab and enter the code <b>${esc(p.code || "")}</b>
-     (this Mac: ${esc(p.ip || "")}:${esc(p.port || "")}).</p>`;
+     (this ${esc(comp())}: <b>${esc(p.ip || "")}:${esc(p.port || "")}</b>${p.discovery ? "" : ", entered by hand on the phone"}).</p>`;
   // the Measure section depends on which cameras are ready; redraw it only when that changes
   const key = list.map(q => q.key + (q.camera ? "1" : "0")).join();
   if (key !== S._tkey) { S._tkey = key; if (!["starting", "waiting", "measuring"].includes((S.job || {}).phase)) renderTrain(); }
@@ -1048,7 +1058,7 @@ async function showProfiles() {
   const r = await api("/api/profiles");
   const cards = r.profiles.map(p => `
     <section class="sec profile" data-model="${esc(p.model)}">
-      <h3>${esc(p.name)} <span class="hint">${esc(p.model)}${p.model === r.current ? " · the paired iPhone" : ""}</span></h3>
+      <h3>${esc(p.name)} <span class="hint">${esc(p.model)}${p.model === r.current ? " · the paired phone" : ""}</span></h3>
       ${p.camera ? `<p class="hint" style="margin:-4px 0 8px">Trained with: ${esc(p.camera.lens || "back camera")}, ISO ${esc(p.camera.iso)}, RAW ${esc(p.camera.format || "")}</p>` : ""}
       <p class="lead">Average on the TVs it was trained on: <b class="${deClass(p.de_avg)}">dE ${fmt(p.de_avg)}</b>, with one conversion per kind of screen.
         ${Object.values(p.panels || {}).map(q => `<br>${esc(q.label)}: dE ${fmt(q.de_avg)} on ${q.tvs.map(esc).join(", ")}${q.unseen != null ? `; about ${fmt(q.unseen)} on one it hasn't seen` : ""}`).join("")}</p>
@@ -1059,11 +1069,11 @@ async function showProfiles() {
       <div class="srcrow"><button class="secondary" data-act="rename">Rename</button><button class="secondary" data-act="export">Export profile</button></div>
     </section>`).join("");
   $("#main").innerHTML = `<div class="tvhead"><h1>Camera profiles</h1></div>
-    <p class="empty" style="margin-top:-8px">One profile per iPhone model. It converts that camera's readings into the meter's,
+    <p class="empty" style="margin-top:-8px">One profile per phone model. It converts that camera's readings into the meter's,
     and works on any TV. Every TV you train it on is added to the same profile, which makes it more accurate on TVs it has never seen,
     since different TV technologies (quantum dot, OLED, Micro RGB) fool cameras in different ways.</p>
     ${cards || '<p class="empty">No profiles yet. Train them on the Train phone profiles page.</p>'}
-    <section class="sec"><h3>Import a profile</h3><p class="lead">For example one exported on another Mac. Training sessions are merged into the profile for that iPhone model.</p>
+    <section class="sec"><h3>Import a profile</h3><p class="lead">For example one exported on another ${esc(comp())}. Training sessions are merged into the profile for that phone model.</p>
       <input type="file" id="pimport" accept=".json,application/json"></section>`;
   document.querySelectorAll(".profile").forEach(card => {
     const model = card.dataset.model;
@@ -1072,7 +1082,7 @@ async function showProfiles() {
       await api("/api/profiles/delete_session", { model, index: +b.dataset.del }); showProfiles();
     });
     card.querySelector('[data-act="rename"]').onclick = async () => {
-      const name = prompt("Name for this iPhone profile, e.g. iPhone 18 Pro", card.querySelector("h3").firstChild.textContent.trim());
+      const name = prompt("Name for this phone profile, e.g. iPhone 18 Pro or Galaxy S24+", card.querySelector("h3").firstChild.textContent.trim());
       if (name !== null) { await api("/api/profiles/rename", { model, name }); showProfiles(); }
     };
     card.querySelector('[data-act="export"]').onclick = async () => {

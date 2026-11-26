@@ -27,6 +27,7 @@ Needs ArgyllCMS `spotread` on PATH. No Python packages needed.
 """
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -35,6 +36,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -233,15 +235,71 @@ def video_length(hdr):
 
 # ======================================================================== meters
 
+WINDOWS = sys.platform == "win32"
+
+
+def spotread_env():
+    env = dict(os.environ)
+    env.setdefault("ARGYLL_EXCLUDE_SERIAL_SCAN",
+                   "/dev/cu.Bluetooth-Incoming-Port;/dev/tty.Bluetooth-Incoming-Port;/dev/cu.debug-console")
+    return env
+
+
+def spotread_ports(env=None, timeout=30):
+    """The ports `spotread -?` lists, as (number, name). Raises subprocess.TimeoutExpired if it hangs."""
+    out = subprocess.run(["spotread", "-?"], capture_output=True, text=True, timeout=timeout,
+                         env=env or spotread_env(), errors="replace")
+    return re.findall(r"^\s*(\d+)\s*=\s*'([^']+)'", out.stdout + out.stderr, re.M)
+
+
+def is_meter_port(name):
+    """A real instrument, not a serial port: macOS lists those as /dev/..., Windows as COMn."""
+    return not name.startswith("/dev/") and not re.match(r"^(\\\\\.\\)?COM\d+$", name, re.I)
+
+
+def install_hint():
+    if WINDOWS:
+        return ("Download ArgyllCMS 3.5.0 for Windows 64-bit from argyllcms.com, unzip it (for example to "
+                "C:\\Argyll_V3.5.0), add its bin folder to PATH (or set it in 'Start on Windows.cmd'), "
+                "then start TV Calibrator again.")
+    return "Install it with: brew install argyll-cms"
+
+
+def no_meter_hint(computer="Mac"):
+    if WINDOWS:
+        return ("Unplug and replug it straight into this computer (not a hub), and quit Calibrite PROFILER "
+                "(right-click its icon in the taskbar's notification area, then Quit).")
+    return f"Unplug and replug it straight into the {computer}, and quit Calibrite PROFILER."
+
+
+def _has_port_arg(args):
+    return any(a == "-c" or (a.startswith("-c") and a[2:].isdigit()) for a in args)
+
+
+SPOTREAD_MISSING = "spotread not found - install ArgyllCMS and make sure it's on your PATH."
+
+
+class MeterError(RuntimeError):
+    """The meter can't be used (spotread missing). A RuntimeError, not SystemExit, so the app's worker
+    threads report it; the command line turns it into an exit message (main)."""
+
+
 class SpotreadMeter:
     """Talks to ArgyllCMS spotread. Keeps one spotread running and asks it for readings
     (fast); if that doesn't work, falls back to starting spotread for every reading (slow)."""
 
     def __init__(self, extra_args, persistent=True):
-        self.args = extra_args
-        self.env = dict(os.environ)
-        self.env.setdefault("ARGYLL_EXCLUDE_SERIAL_SCAN",
-                            "/dev/cu.Bluetooth-Incoming-Port;/dev/tty.Bluetooth-Incoming-Port;/dev/cu.debug-console")
+        self.args = list(extra_args)
+        self.env = spotread_env()
+        if WINDOWS and not _has_port_arg(self.args):
+            # Windows lists COM ports before USB/HID instruments, so the meter is often not port 1
+            # (spotread's default). Pick the first real instrument.
+            try:
+                meters = [n for n, d in spotread_ports(self.env) if is_meter_port(d)]
+                if meters and meters[0] != "1":
+                    self.args += ["-c", meters[0]]
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         self.proc = None
         self.mode = "one-shot"
         if persistent:
@@ -256,7 +314,7 @@ class SpotreadMeter:
                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                          text=True, bufsize=1, env=env)
         except FileNotFoundError:
-            sys.exit("spotread not found - install ArgyllCMS and make sure it's on your PATH.")
+            raise MeterError(SPOTREAD_MISSING)
         self.q = queue.Queue()
 
         def pump():
@@ -325,7 +383,7 @@ class SpotreadMeter:
             out = subprocess.run(["spotread", "-O", "-x"] + self.args, capture_output=True, text=True,
                                  timeout=20, env=self.env)
         except FileNotFoundError:
-            sys.exit("spotread not found - install ArgyllCMS and make sure it's on your PATH.")
+            raise MeterError(SPOTREAD_MISSING)
         except subprocess.TimeoutExpired:
             return t0, self.now(), None
         t1 = self.now()
@@ -1320,29 +1378,30 @@ def check(spotread_args, hdr):
     print("1. ArgyllCMS installed")
     path = shutil.which("spotread")
     if not path:
-        bad("spotread not found. Install ArgyllCMS (brew install argyll-cms).")
+        bad("spotread not found. Install ArgyllCMS (brew install argyll-cms)." if not WINDOWS else
+            "spotread not found. " + install_hint())
         return
     ok(f"spotread found at {path}")
 
     print("2. Meter detected")
-    env = dict(os.environ)
-    env.setdefault("ARGYLL_EXCLUDE_SERIAL_SCAN",
-                   "/dev/cu.Bluetooth-Incoming-Port;/dev/tty.Bluetooth-Incoming-Port;/dev/cu.debug-console")
     try:
-        out = subprocess.run(["spotread", "-?"], capture_output=True, text=True, timeout=30, env=env)
-        text = out.stdout + out.stderr
+        ports = spotread_ports()
     except subprocess.TimeoutExpired:
-        bad("spotread froze while looking for meters (the Bluetooth-port problem?).")
+        bad("spotread froze while looking for meters (the Bluetooth-port problem?)." + (
+            " Set ARGYLL_EXCLUDE_SERIAL_SCAN to your Bluetooth COM ports, e.g. COM5;COM6." if WINDOWS else ""))
         return
-    ports = re.findall(r"^\s*(\d+)\s*=\s*'([^']+)'", text, re.M)
-    meters = [(n, d) for n, d in ports if not d.startswith("/dev/")]
+    meters = [(n, d) for n, d in ports if is_meter_port(d)]
     for n, d in ports:
         print(f"        port {n}: {d}")
     if not meters:
-        bad("No meter in the list. Unplug/replug it, plug straight into the Mac, quit Calibrite PROFILER.")
+        bad("No meter in the list. Unplug/replug it, plug straight into the Mac, quit Calibrite PROFILER."
+            if not WINDOWS else "No meter in the list. " + no_meter_hint())
         return
-    ok(f"meter found: {meters[0][1]}" + ("" if meters[0][0] == "1" else
-       f"  (not port 1 - add  --spotread-args \"-y n -c {meters[0][0]}\")"))
+    if WINDOWS and not _has_port_arg(spotread_args):
+        ok(f"meter found: {meters[0][1]}" + ("" if meters[0][0] == "1" else f"  (port {meters[0][0]}, used automatically)"))
+    else:
+        ok(f"meter found: {meters[0][1]}" + ("" if meters[0][0] == "1" else
+           f"  (not port 1 - add  --spotread-args \"-y n -c {meters[0][0]}\")"))
 
     print("3. Taking 3 readings (meter on the TV, any bright picture)")
     meter = SpotreadMeter(spotread_args)
@@ -1418,12 +1477,38 @@ def load_state(path):
     return {"version": STATE_VERSION, "rounds": [], "sens": {}}
 
 
+# Windows can't swap in a new file while another thread has the old one open, so on Windows the app's
+# own readers and writers of its JSON files take turns (tvcal_app reads under this lock too).
+IO_LOCK = threading.RLock()
+
+
+def io_lock():
+    return IO_LOCK if WINDOWS else contextlib.nullcontext()
+
+
 def write_json_atomic(path, data):
-    """Write to a temporary file, then swap it in: a reader never sees a half-written file."""
-    tmp = f"{path}.{os.getpid()}.tmp"
+    """Write to a temporary file, then swap it in: a reader never sees a half-written file.
+    The temporary name is per thread (the app saves from several). On Windows the swap is also retried
+    for a moment: a virus scanner or indexer can briefly hold either file open."""
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=1)
-    os.replace(tmp, path)
+    if not WINDOWS:
+        os.replace(tmp, path)
+        return
+    with IO_LOCK:
+        for attempt in range(60):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 59:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+                    raise
+                time.sleep(0.05)
 
 
 def save_state(path, st):
@@ -1655,5 +1740,12 @@ def main():
     save_state(path, st)
 
 
+def _main_cli():
+    try:
+        main()
+    except MeterError as e:
+        sys.exit(str(e))
+
+
 if __name__ == "__main__":
-    main()
+    _main_cli()

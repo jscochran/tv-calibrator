@@ -1,0 +1,47 @@
+{
+  "format": 1,
+  "channel": "https://www.youtube.com/@Slidebean",
+  "help": "",
+  "explainer": "https://www.youtube.com/playlist?list=PLO2NVxlvLsEM",
+  "instagram": "https://www.instagram.com/slidebean/",
+  "newsletter": "https://untangled.slidebean.com/?utm_source=tv-calibrator&utm_medium=app&utm_campaign=calibration-complete",
+  "playlists": {
+    "sdr": "",
+    "hdr10": ""
+  },
+  "downloads": {
+    "hdr10p": "",
+    "dv": ""
+  },
+  "videos": {
+    "SDR 00 - Quick check (play from the start)": "https://youtu.be/jGk6o8bytjY",
+    "SDR 00b - Point finder (play from the start)": "",
+    "SDR 01 - White (bright end)": "",
+    "SDR 02 - Grey 30 (dark end)": "",
+    "SDR 03 - Grey 50 (middle)": "",
+    "SDR 04 - Grey 20": "",
+    "SDR 05 - Grey 40": "",
+    "SDR 06 - Grey 60": "",
+    "SDR 07 - Grey 80": "",
+    "SDR 08 - Red": "",
+    "SDR 09 - Green": "",
+    "SDR 10 - Blue": "",
+    "SDR 11 - Cyan": "",
+    "SDR 12 - Magenta": "",
+    "SDR 13 - Yellow": "",
+    "HDR10 00 - Quick check (play from the start)": "",
+    "HDR10 00b - Point finder (play from the start)": "",
+    "HDR10 01 - Grey 65 (bright end)": "",
+    "HDR10 02 - Grey 35 (dark end)": "",
+    "HDR10 03 - Grey 50 (middle)": "",
+    "HDR10 04 - Grey 40": "",
+    "HDR10 05 - Grey 60": "",
+    "HDR10 06 - Grey 70": "",
+    "HDR10 07 - Red": "",
+    "HDR10 08 - Green": "",
+    "HDR10 09 - Blue": "",
+    "HDR10 10 - Cyan": "",
+    "HDR10 11 - Magenta": "",
+    "HDR10 12 - Yellow": ""
+  }
+}

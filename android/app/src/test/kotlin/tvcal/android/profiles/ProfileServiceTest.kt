@@ -10,6 +10,8 @@ import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import tvcal.android.camera.ApproximateResult
+import tvcal.android.camera.ApproximateSource
 import tvcal.android.storage.PanelType
 import tvcal.kit.BuiltInProfiles
 import tvcal.kit.CameraProfile
@@ -484,6 +486,207 @@ class ProfileServiceTest {
                 "within about 2 dE of one, so smaller differences may not be real.",
             s.marginNote(PanelType.LCD),
         )
+    }
+
+    // ---- the approximate profile (Android, design §13.7) ----
+
+    private val approxName = "Pixel 8 Pro (approximate: phone's own colour data)"
+    private fun approx() = prof(version = 0, name = approxName, matrix = listOf(
+        listOf(0.004, 0.001, 0.0), listOf(0.002, 0.003, 0.0), listOf(0.0, 0.0, 0.007),
+    ))
+
+    /** A fake ApproximateSource whose answer can change (e.g. once the permission is "granted"). */
+    private class FakeApprox(var result: ApproximateResult) : ApproximateSource {
+        var loads = 0
+        override fun load(): ApproximateResult {
+            loads++
+            return result
+        }
+    }
+
+    @Test fun approximateWhenNothingElseExists() {
+        val s = service()
+        s.attachApproximate(FakeApprox(ApproximateResult.Ready(approx())))
+        assertEquals(ProfileService.Source.APPROXIMATE, s.source)
+        assertEquals(approx(), s.profile)
+        assertTrue(s.isApproximate)
+        assertFalse(s.isStandard)
+        assertFalse(s.checksSettings)
+        assertFalse(s.approximateNeedsPermission)
+        assertEquals(ProfileService.Status.Ready, s.status)
+    }
+
+    @Test fun everyOtherProfileBeatsTheApproximateOne() {
+        val ready = FakeApprox(ApproximateResult.Ready(approx()))
+
+        val std = service(BuiltInProfiles(standard = "apple/std", profiles = listOf(prof(model = "apple/std"))))
+        std.attachApproximate(ready)
+        assertEquals(ProfileService.Source.STANDARD, std.source)
+
+        val builtIn = service(BuiltInProfiles(profiles = listOf(prof(version = 1))))
+        builtIn.attachApproximate(ready)
+        assertEquals(ProfileService.Source.BUILT_IN, builtIn.source)
+        assertTrue(builtIn.checksSettings)
+
+        write("current.json", prof(version = 2))
+        val downloaded = service()
+        downloaded.attachApproximate(ready)
+        assertEquals(ProfileService.Source.DOWNLOADED, downloaded.source)
+
+        write("imported.json", prof(version = 0, name = "Imported"))
+        val imported = service()
+        imported.attachApproximate(ready)
+        assertEquals(ProfileService.Source.IMPORTED, imported.source)
+
+        // None of them ever asked the approximate source, and reloadApproximate never replaces them.
+        assertEquals(0, ready.loads)
+        for (s in listOf(std, builtIn, downloaded, imported)) {
+            val before = s.source
+            s.reloadApproximate()
+            assertEquals(before, s.source)
+        }
+        assertEquals(0, ready.loads)
+    }
+
+    @Test fun importingReplacesTheApproximateProfile() {
+        val s = service()
+        s.attachApproximate(FakeApprox(ApproximateResult.Ready(approx())))
+        s.importProfile(json(prof(version = 1, name = "Lab")))
+        assertEquals(ProfileService.Source.IMPORTED, s.source)
+        assertTrue(s.checksSettings)
+    }
+
+    @Test fun needsPermissionThenGranted() {
+        val src = FakeApprox(ApproximateResult.NeedsPermission)
+        val s = service()
+        s.attachApproximate(src)
+        assertNull(s.profile)
+        assertTrue(s.approximateNeedsPermission)
+        assertEquals(ProfileService.Status.Checking, s.status)
+        val waiting = "This phone (google/husky) doesn't have its own camera profile yet. Start the camera to use an " +
+            "approximate one made from its camera's own colour data."
+        assertEquals(waiting, s.summary)
+
+        // Still no permission: nothing changes.
+        s.reloadApproximate()
+        assertNull(s.profile)
+        assertTrue(s.approximateNeedsPermission)
+
+        // The user allowed the camera.
+        src.result = ApproximateResult.Ready(approx())
+        s.reloadApproximate()
+        assertEquals(ProfileService.Source.APPROXIMATE, s.source)
+        assertEquals(ProfileService.Status.Ready, s.status)
+        assertFalse(s.approximateNeedsPermission)
+        assertTrue(s.summary.contains("uses an approximate one"))
+    }
+
+    @Test fun needsPermissionSummaryOverridesUnsupportedAndNotConfigured() = runTest {
+        val unsupported = service(http = FakeHttp(mapOf("${server}index.json" to ok(catalog()))))
+        unsupported.attachApproximate(FakeApprox(ApproximateResult.NeedsPermission))
+        unsupported.refresh()
+        assertEquals(ProfileService.Status.Unsupported, unsupported.status)
+        assertTrue(unsupported.summary.startsWith("This phone (google/husky) doesn't have its own camera profile yet. Start the camera"))
+
+        val offlineBuild = service(server = null)
+        offlineBuild.attachApproximate(FakeApprox(ApproximateResult.NeedsPermission))
+        offlineBuild.refresh()
+        assertEquals(ProfileService.Status.NotConfigured, offlineBuild.status)
+        assertTrue(offlineBuild.summary.contains("Start the camera"))
+
+        // Offline keeps its own text (the server couldn't be reached).
+        val offline = service(http = ServiceHttp { throw UnknownHostException("example.test") })
+        offline.attachApproximate(FakeApprox(ApproximateResult.NeedsPermission))
+        offline.refresh()
+        val st = offline.status
+        assertTrue(st is ProfileService.Status.Offline)
+        assertEquals((st as ProfileService.Status.Offline).why, offline.summary)
+    }
+
+    @Test fun reloadNeverMovesASettledStatusBackToChecking() = runTest {
+        val src = FakeApprox(ApproximateResult.Unavailable("no colour data"))
+        val s = service(http = FakeHttp(mapOf("${server}index.json" to ok(catalog()))))
+        s.attachApproximate(src)
+        s.refresh()
+        assertEquals(ProfileService.Status.Unsupported, s.status)
+        s.reloadApproximate()
+        assertEquals(ProfileService.Status.Unsupported, s.status)
+        assertNull(s.profile)
+        assertFalse(s.approximateNeedsPermission)
+
+        // Once it can be made, it is used, and the status becomes Ready.
+        src.result = ApproximateResult.Ready(approx())
+        s.reloadApproximate()
+        assertEquals(ProfileService.Status.Ready, s.status)
+        assertEquals(ProfileService.Source.APPROXIMATE, s.source)
+    }
+
+    @Test fun unavailableOrThrowingSourceMeansNoProfile() {
+        val s = service()
+        s.attachApproximate(FakeApprox(ApproximateResult.Unavailable("This phone can't take RAW photos, which the camera meter needs.")))
+        assertNull(s.profile)
+        assertFalse(s.approximateNeedsPermission)
+
+        val t = service()
+        t.attachApproximate(ApproximateSource { throw IllegalStateException("boom") })
+        assertNull(t.profile)
+        assertEquals(ProfileService.Status.Checking, t.status)
+
+        // An invalid profile from the source is ignored.
+        val u = service()
+        u.attachApproximate(FakeApprox(ApproximateResult.Ready(prof(matrix = listOf(listOf(1.0, 0.0), listOf(0.0, 1.0))))))
+        assertNull(u.profile)
+    }
+
+    @Test fun approximateTexts() {
+        val s = service()
+        s.attachApproximate(FakeApprox(ApproximateResult.Ready(approx())))
+        assertEquals(approxName, s.profileLabel)
+        assertEquals(
+            "This phone (google/husky) doesn't have its own camera profile yet, so it uses an approximate one made " +
+                "from its camera's own colour data. Readings are approximate. When a profile for this model is " +
+                "ready, it downloads automatically.",
+            s.summary,
+        )
+        for (panel in listOf(PanelType.WOLED, PanelType.UNKNOWN, PanelType.LCD)) {
+            assertEquals(4.0, s.marginDE(panel)!!, 0.0)
+            assertEquals(
+                "This phone has no camera profile of its own yet and uses an approximate one made from its " +
+                    "camera's own colour data, so its readings are approximate: differences under about 4 dE may " +
+                    "not be real.",
+                s.marginNote(panel),
+            )
+        }
+    }
+
+    @Test fun refreshDownloadsTheModelsProfileOverTheApproximateOne() = runTest {
+        val body = json(prof(version = 1, name = "Pixel 8 Pro"))
+        val http = FakeHttp(mapOf(
+            "${server}index.json" to ok(catalog(entry(version = 1, sha = sha256Hex(body)))),
+            "${server}profiles/google-husky-v1.json" to ok(body),
+        ))
+        val s = service(http = http)
+        s.attachApproximate(FakeApprox(ApproximateResult.Ready(approx())))
+        assertTrue(s.isApproximate)
+        s.refresh()
+        assertEquals(ProfileService.Source.DOWNLOADED, s.source)
+        assertEquals("Pixel 8 Pro v1 (downloaded)", s.profileLabel)
+        assertTrue(s.checksSettings)
+        assertEquals(ProfileService.Status.Ready, s.status)
+    }
+
+    @Test fun refreshWithoutThisModelKeepsTheApproximateProfileReady() = runTest {
+        val s = service(http = FakeHttp(mapOf("${server}index.json" to ok(catalog()))))
+        s.attachApproximate(FakeApprox(ApproximateResult.Ready(approx())))
+        s.refresh()
+        assertEquals(ProfileService.Status.Ready, s.status)
+        assertEquals(ProfileService.Source.APPROXIMATE, s.source)
+
+        val offline = service(http = ServiceHttp { throw UnknownHostException("example.test") })
+        offline.attachApproximate(FakeApprox(ApproximateResult.Ready(approx())))
+        offline.refresh()
+        assertEquals(ProfileService.Status.Ready, offline.status)
+        assertEquals(ProfileService.Source.APPROXIMATE, offline.source)
     }
 }
 

@@ -208,7 +208,7 @@ fun Eyebrow(text: String, modifier: Modifier = Modifier, colour: Color = Theme.t
     Text(text, style = Fonts.small, color = colour, modifier = modifier)
 }
 
-/** TipRow.Tone. Swift `.todo` is [ACTION] (TODO would shadow Kotlin's TODO()). */
+/** TipRow.Tone. Swift `.todo` is [ACTION] (a TODO entry would shadow Kotlin's TODO function). */
 enum class TipTone { ACTION, OK, LIMIT }
 
 /**

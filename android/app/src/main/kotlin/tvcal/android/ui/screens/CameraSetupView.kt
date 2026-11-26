@@ -64,8 +64,11 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import tvcal.android.LocalApp
+import tvcal.android.camera.Camera2Meter
 import tvcal.android.camera.CameraMeter
+import tvcal.android.camera.CameraPreview
 import tvcal.android.camera.CameraXYZMeter
+import tvcal.android.camera.rememberCameraStarter
 import tvcal.android.measure.FreeMeter
 import tvcal.android.profiles.ProfileService
 import tvcal.android.ui.components.BalanceBar
@@ -95,8 +98,8 @@ import tvcal.android.ui.theme.white
 import tvcal.kit.LiveAnalysis
 
 // Port of Views/CameraSetupView.swift (camera setup and the live meter) and CameraViewfinder from
-// Camera/CameraXYZMeter.swift. Until P4 the camera is UnavailableCameraMeter: camera.available is false and
-// camera.message is CameraMeter.UNAVAILABLE, which these screens show as a tip; starting it changes nothing.
+// Camera/CameraXYZMeter.swift. The camera is Camera2Meter on phones with a RAW + manual-sensor back camera;
+// elsewhere UnavailableCameraMeter, whose message (what the phone lacks) these screens show as a tip.
 
 /** What a test reading gave (Swift CameraSetupView.TestOutcome). */
 private sealed interface TestOutcome {
@@ -228,7 +231,7 @@ fun CameraSetupView(
     fun runTest() {
         val p = profiles.profile ?: return
         app.scope.launch {
-            val meter = CameraXYZMeter(camera = camera, profile = p, checkSettings = !profiles.isStandard)
+            val meter = CameraXYZMeter(camera = camera, profile = p, checkSettings = profiles.checksSettings)
             try {
                 val r = meter.read()
                 val xyz = r.xyz
@@ -247,6 +250,9 @@ fun CameraSetupView(
         }
     }
 
+    // Asks for the CAMERA permission first when needed (design §12), then starts the camera.
+    val startCamera = rememberCameraStarter { app.scope.launch { app.model.startCamera() } }
+
     val darknessActionTitle =
         if (redoDark || messageTip?.tone == TipTone.LIMIT) "Measure the darkness again" else "Measure the darkness"
 
@@ -260,10 +266,11 @@ fun CameraSetupView(
                 when (stage) {
                     SetupStage.START -> PrimaryButton(
                         "Start the camera",
-                        onClick = { app.scope.launch { app.model.startCamera() } },
+                        onClick = startCamera,
                         // As on iPhone: tappable even when the meter isn't available; start() then reports the
                         // problem through camera.message (UnavailableCameraMeter re-sets UNAVAILABLE).
-                        enabled = profiles.profile != null && !camera.busy,
+                        // Android: also when only the approximate profile is missing, waiting for the permission.
+                        enabled = (profiles.profile != null || profiles.approximateNeedsPermission) && !camera.busy,
                     )
                     SetupStage.DARKNESS -> PrimaryButton(
                         darknessActionTitle,
@@ -306,6 +313,8 @@ fun CameraSetupView(
             ) {
                 if (profiles.isStandard) {
                     TipRow(TipTone.LIMIT, "Using the standard profile: readings are approximate.")
+                } else if (profiles.isApproximate) {
+                    TipRow(TipTone.LIMIT, "Using an approximate profile: readings are approximate.")
                 }
                 when (stage) {
                     SetupStage.START -> {
@@ -317,6 +326,12 @@ fun CameraSetupView(
                                 Text("No matching camera profile is installed for this phone.", style = Fonts.bodyBrand.white())
                                 Text(
                                     "The standard profile works for now. Settings checks for a newer one.",
+                                    style = Fonts.captionBrand.secondary(),
+                                )
+                            } else if (profile != null && profiles.isApproximate) {
+                                Text("No matching camera profile is installed for this phone.", style = Fonts.bodyBrand.white())
+                                Text(
+                                    "An approximate one made from the camera's own colour data works for now. Settings checks for a newer one.",
                                     style = Fonts.captionBrand.secondary(),
                                 )
                             } else if (profile != null) {
@@ -587,7 +602,7 @@ private fun PlacementIllustration() {
 
 /**
  * The camera view (Swift CameraViewfinder): a 3:4 frame, 14 dp corners, Theme.previewFill, with the yellow
- * 1.5 dp measuring box (10% × 10%) in the centre. No live preview until P4 (the Camera2 meter adds one).
+ * 1.5 dp measuring box (10% × 10%) in the centre, over the live CameraPreview while a Camera2Meter runs.
  */
 @Composable
 fun CameraViewfinder(camera: CameraMeter, modifier: Modifier = Modifier) {
@@ -601,7 +616,8 @@ fun CameraViewfinder(camera: CameraMeter, modifier: Modifier = Modifier) {
                 else "Camera off. The measuring box is in the middle"
             },
     ) {
-        // P4: the Camera2 preview goes here while camera.running.
+        // The live picture (Camera2Meter only), under the measuring box.
+        if (camera.running && camera is Camera2Meter) CameraPreview(camera, Modifier.fillMaxSize())
         Canvas(Modifier.fillMaxSize()) {
             val lw = 1.5.dp.toPx()
             val bw = size.width * 0.1f
@@ -633,7 +649,7 @@ fun LiveMeterView(onBack: () -> Unit, onOpenCamera: () -> Unit) {
     fun start() {
         if (app.model.cameraBlocker != null) return
         val p = app.profiles.profile ?: return
-        meter.start(CameraXYZMeter(camera = app.camera, profile = p, checkSettings = !app.profiles.isStandard), hdr)
+        meter.start(CameraXYZMeter(camera = app.camera, profile = p, checkSettings = app.profiles.checksSettings), hdr)
     }
 
     // Swift .onAppear { start() } and .onChange(of: hdr) { start() }.

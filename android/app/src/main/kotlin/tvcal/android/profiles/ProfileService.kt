@@ -17,6 +17,9 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.doubleOrNull
+import tvcal.android.camera.ApproximateResult
+import tvcal.android.camera.ApproximateSource
+import tvcal.android.camera.ProvisionalProfile
 import tvcal.android.storage.PanelType
 import tvcal.kit.BuiltInProfiles
 import tvcal.kit.CameraProfile
@@ -41,7 +44,8 @@ import kotlin.math.max
 /**
  * Picks this phone's camera profile (port of Profiles/ProfileService.swift; rules in the port map §6):
  * 1. imported.json (Lab), 2. this model's own profile (built in or Profiles/current.json, newer wins, ties →
- * built in), 3. the built-in standard profile, 4. none. `refresh()` asks the server for a newer one.
+ * built in), 3. the built-in standard profile, 4. Android: the approximate profile made from the phone's own
+ * camera colour data (ProvisionalProfile, design §13.7), 5. none. `refresh()` asks the server for a newer one.
  * Files: `<dir>/catalog.json`, `<dir>/current.json`, `<dir>/imported.json` (dir = filesDir/Profiles), JSON via
  * tvcal.kit.ProfileJson. User-visible text says "phone" where the Swift says "iPhone".
  */
@@ -76,6 +80,8 @@ class ProfileService(
         IMPORTED,
         /** Another model's profile, used because this model has none yet. */
         STANDARD,
+        /** Android: made from this phone's own camera colour data (ProvisionalProfile), when nothing else exists. */
+        APPROXIMATE,
     }
 
     var profile: CameraProfile? by mutableStateOf(null)
@@ -93,6 +99,20 @@ class ProfileService(
     val isImported: Boolean get() = source == Source.IMPORTED
     /** Using the standard profile because this model has none of its own: readings are approximate. */
     val isStandard: Boolean get() = source == Source.STANDARD
+    /** Android: using the profile made from the phone's own colour data (lowest priority). */
+    val isApproximate: Boolean get() = source == Source.APPROXIMATE
+    /** Whether meters compare the camera's settings with the profile's (off for standard and approximate). */
+    val checksSettings: Boolean get() = !isStandard && !isApproximate
+
+    /**
+     * Android: no profile yet, but an approximate one can be made once the CAMERA permission is granted
+     * (the Camera setup screen then lets the camera start). Set by choose() (agent (c)).
+     */
+    var approximateNeedsPermission: Boolean by mutableStateOf(false)
+        private set
+
+    /** Android: where the approximate profile comes from (TVCalApp attaches AndroidApproximateSource). */
+    private var approximateSource: ApproximateSource? = null
 
     init {
         runCatching { dir.mkdirs() }
@@ -144,11 +164,55 @@ class ProfileService(
             } else if (standard != null) {
                 use(standard, Source.STANDARD)
             } else {
-                profile = null
-                source = null
+                val approximate = loadApproximate()
+                if (approximate != null) {
+                    use(approximate, Source.APPROXIMATE)
+                } else {
+                    profile = null
+                    source = null
+                }
             }
         }
+        // A trained or standard profile makes the approximate one (and its permission) irrelevant.
+        if (source != Source.APPROXIMATE && profile != null) approximateNeedsPermission = false
         status = if (profile == null) Status.Checking else Status.Ready
+    }
+
+    /**
+     * Android: the approximate step (lowest priority). Ready → its profile; NeedsPermission → null and
+     * [approximateNeedsPermission]; Unavailable (or no source, or a source that throws) → null.
+     */
+    private fun loadApproximate(): CameraProfile? {
+        val src = approximateSource ?: return null
+        val result = try {
+            src.load()
+        } catch (e: Exception) {
+            ApproximateResult.Unavailable(e.message ?: "error")
+        }
+        approximateNeedsPermission = result is ApproximateResult.NeedsPermission
+        return (result as? ApproximateResult.Ready)?.profile?.takeIf { it.isValid }
+    }
+
+    /**
+     * Android: attaches the approximate-profile source (lowest priority) and re-picks. Design §13.7: choose()
+     * then falls back to it after imported, own and standard (agent (c) adds that step).
+     */
+    fun attachApproximate(source: ApproximateSource) {
+        approximateSource = source
+        choose()
+    }
+
+    /**
+     * Android: asks the approximate source again (after the CAMERA permission was granted or the camera started)
+     * and re-picks without disturbing a status a refresh already settled. Called by AppModel.startCamera.
+     */
+    fun reloadApproximate() {
+        if (approximateSource == null) return
+        // Trained profiles (imported, built in, downloaded) and the standard one always win.
+        if (profile != null && !isApproximate) return
+        val p = loadApproximate() ?: return      // NeedsPermission / Unavailable: the status stays as it is
+        if (profile != p || source != Source.APPROXIMATE) use(p, Source.APPROXIMATE)
+        status = Status.Ready
     }
 
     private fun use(p: CameraProfile, from: Source) {
@@ -253,12 +317,14 @@ class ProfileService(
     val profileLabel: String
         get() {
             val p = profile ?: return "None"
+            // The approximate profile's name already says what it is (and it has no version worth showing).
+            if (isApproximate) return if (p.name.isEmpty()) p.model else p.name
             val from = when (source) {
                 Source.BUILT_IN -> "built in"
                 Source.DOWNLOADED -> "downloaded"
                 Source.IMPORTED -> "imported"
                 Source.STANDARD -> "standard profile"
-                null -> ""
+                Source.APPROXIMATE, null -> ""
             }
             return "${if (p.name.isEmpty()) p.model else p.name} v${p.version}" + (if (from.isEmpty()) "" else " ($from)")
         }
@@ -270,6 +336,7 @@ class ProfileService(
      */
     fun marginDE(panel: PanelType): Double? {
         val p = profile ?: return null
+        if (isApproximate) return ProvisionalProfile.MARGIN_DE
         if (isStandard || panel == PanelType.UNKNOWN) return 3.0
         val de = p.panel(panel.profileKey)?.deAvg ?: return 3.0
         return max(1.0, swiftRounded(de * 4) / 2)
@@ -281,6 +348,11 @@ class ProfileService(
      */
     fun marginNote(panel: PanelType): String? {
         val p = profile ?: return null
+        if (isApproximate) {
+            return "This phone has no camera profile of its own yet and uses an approximate one made from its " +
+                "camera's own colour data, so its readings are approximate: differences under about " +
+                cfmt(ProvisionalProfile.MARGIN_DE, 0) + " dE may not be real."
+        }
         if (isStandard) {
             return "This phone has no camera profile of its own yet and uses the standard one, so its readings are " +
                 "approximate: differences under about 3 dE may not be real."
@@ -301,6 +373,16 @@ class ProfileService(
 
     /** Short text for the settings and camera screens (and AppModel.cameraBlocker when there's no profile). */
     val summary: String
+        get() {
+            // Android: no profile yet, but the approximate one is only waiting for the CAMERA permission.
+            if (profile == null && approximateNeedsPermission && status !is Status.Offline) {
+                return "This phone ($model) doesn't have its own camera profile yet. Start the camera to use an " +
+                    "approximate one made from its camera's own colour data."
+            }
+            return statusSummary
+        }
+
+    private val statusSummary: String
         get() = when (val s = status) {
             Status.Checking -> "Checking for this phone's camera profile…"
             Status.Ready -> {
@@ -309,7 +391,11 @@ class ProfileService(
                     "Ready."
                 } else {
                     val name = if (p.name.isEmpty()) p.model else p.name
-                    if (isStandard) {
+                    if (isApproximate) {
+                        "This phone ($model) doesn't have its own camera profile yet, so it uses an approximate one " +
+                            "made from its camera's own colour data. Readings are approximate. When a profile for " +
+                            "this model is ready, it downloads automatically."
+                    } else if (isStandard) {
                         "This phone ($model) doesn't have its own camera profile yet, so it uses the standard one ($name). " +
                             "Readings are approximate. When a profile for this model is ready, it downloads automatically."
                     } else {

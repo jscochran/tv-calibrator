@@ -132,13 +132,13 @@ class AppModel(
 
     /**
      * Why the camera can't measure yet, or null when it's ready. Order: no profile → profiles.summary;
-     * `!camera.available` → CameraMeter.UNAVAILABLE (Android, until P4); not running → "Start the camera
+     * `!camera.available` → camera.unavailableReason (Android); not running → "Start the camera
      * (Camera setup)."; no dark level → "Measure the camera's darkness once (Camera setup).".
      */
     val cameraBlocker: String?
         get() {
             if (profiles.profile == null) return profiles.summary
-            if (!camera.available) return CameraMeter.UNAVAILABLE
+            if (!camera.available) return camera.unavailableReason
             if (!camera.running) return "Start the camera (Camera setup)."
             if (camera.dark == null) return "Measure the camera's darkness once (Camera setup)."
             return null
@@ -158,6 +158,8 @@ class AppModel(
         } else {
             camera.start(aperture = null)
         }
+        // Android: the camera's colour keys (the approximate profile) can be read once the permission is granted.
+        if (camera.available) profiles.reloadApproximate()
     }
 
     /**
@@ -183,6 +185,6 @@ class AppModel(
     private fun cameraXYZMeter(tv: TVRecord): Meter? {
         if (cameraBlocker != null) return null
         val p = profiles.profile ?: return null
-        return CameraXYZMeter(camera = camera, profile = p, checkSettings = !profiles.isStandard, panel = tv.panel.profileKey)
+        return CameraXYZMeter(camera = camera, profile = p, checkSettings = profiles.checksSettings, panel = tv.panel.profileKey)
     }
 }

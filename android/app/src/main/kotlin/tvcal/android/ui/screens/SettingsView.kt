@@ -90,7 +90,7 @@ private fun ProfileSection(profiles: ProfileService) {
             symbol = Symbols.camera,
         )
         if (p != null) {
-            if (profiles.isStandard) {
+            if (profiles.isStandard || profiles.isApproximate) {
                 Text(profiles.summary, style = Fonts.captionBrand, color = Theme.limit)
             }
             val tvs = p.stats.tvs.size

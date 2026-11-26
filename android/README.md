@@ -103,9 +103,9 @@ cd push-worker; npx wrangler deploy
 | P1 ✅ | Storage (TVs, guide progress), TV brand menu paths, profile loading (built-in + this fork's `server/`), pattern links. 96 JVM tests, JSON-compatible with the iPhone app's files. | — |
 | P2 ✅ | Theme, navigation and every screen. The whole guided flow runs on the **demo TV** (simulated readings, no camera). Checked on a Pixel 7 and the S24+. | — |
 | P3 ✅ | Results charts, share image, history export, chime, keep-screen-on, re-check reminder. | — |
-| P4 | **Camera meter on Camera2**: main camera chosen by id, RAW_SENSOR (binned 4080×3060), minimum ISO, closest focus, OIS off, black-level lock, per-frame result checks, centre-box Bayer means, dark level, white level. Camera setup screen and live meter. | The S24+ on USB debugging |
-| P5 | **Lab mode**: Android lab client (`/api/phone/*`, NSD discovery + manual IP), lab tool patches for **Windows** and non-iPhone models, `build_catalog.py` support for Android model keys. | ArgyllCMS 3.x on Windows |
-| P6 | **Train the Galaxy S24+ profile** on two or more TVs (ideally OLED + LCD), check it, publish to `server/profiles/`, build it into the app. | Display Plus HL |
+| P4 ✅ | **Camera meter on Camera2** ([design](docs/camera-meter-design.md)): main camera through logical id 0, RAW_SENSOR, minimum ISO, closest focus, OIS off, per-frame result checks, centre-box Bayer means with each frame's own black level, dark level, white level, multi-frame shots past the exposure limit (S24+: 0.15 s). Approximate profile from the phone's own DNG colour data until a trained one exists, refused when that data is a generic placeholder (Pixel 7). Tested on both phones: darkness, test reading, live meter. | — |
+| P5 | **Lab mode**. Done: lab tool on **Windows** and for Android models, `build_catalog.py` for Android keys, SDR/HDR training-video generators. To do: the Android lab client (`/api/phone/*`, NSD discovery + manual IP), then a rehearsal with the lab tool's simulated meter. | ArgyllCMS 3.x on Windows (for the real meter) |
+| P6 | **Train the Galaxy S24+ (`samsung/e2q`) and Pixel 7 (`google/panther`) profiles** together on two or more TVs (ideally OLED + LCD), check them, publish to `server/profiles/`, build them into the app. | Display Plus HL |
 | P7 | Re-check reminders (WorkManager). Video push notifications are iPhone-only (APNs) and are dropped. | — |
 
 ### Decisions so far

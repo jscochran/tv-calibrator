@@ -11,8 +11,9 @@ import tvcal.android.app.Notifications
 import tvcal.android.app.Prefs
 import tvcal.android.app.SharedPrefsStore
 import tvcal.android.app.SuccessSound
+import tvcal.android.camera.AndroidApproximateSource
 import tvcal.android.camera.CameraMeter
-import tvcal.android.camera.UnavailableCameraMeter
+import tvcal.android.camera.CameraMeters
 import tvcal.android.profiles.DeviceModel
 import tvcal.android.profiles.LinksService
 import tvcal.android.profiles.ProfileService
@@ -29,14 +30,14 @@ class TVCalApp : Application() {
 
     val prefs: Prefs by lazy { Prefs(SharedPrefsStore(getSharedPreferences(Prefs.FILE, MODE_PRIVATE))) }
     val store: TVStore by lazy { TVStore(File(filesDir, "TVs")) }
-    /** Until P4: the camera reports itself not available. */
-    val camera: CameraMeter by lazy { UnavailableCameraMeter() }
+    /** The camera meter (Camera2Meter once P4 lands; see CameraMeters.create). */
+    val camera: CameraMeter by lazy { CameraMeters.create(this, prefs) }
     val profiles: ProfileService by lazy {
         ProfileService(
             dir = File(filesDir, "Profiles"),
             builtIn = ProfileService.builtIn(readAsset("builtin-profiles.json")),
             model = DeviceModel.identifier,
-        )
+        ).also { it.attachApproximate(AndroidApproximateSource(this, DeviceModel.identifier, DeviceModel.name)) }
     }
     val links: LinksService by lazy {
         LinksService(cacheFile = File(filesDir, "patterns.json"), bundled = { readAsset("patterns.json") })

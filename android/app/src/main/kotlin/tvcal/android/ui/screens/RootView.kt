@@ -534,7 +534,7 @@ private enum class CameraPhase { CHECKING, UNAVAILABLE, SET_UP, DARKNESS, STANDA
 /**
  * Phases checking / unavailable / setUp / darkness / standard / ready (Swift CameraStatusContent): a teal
  * hero Card when there's something to do (setUp, darkness, unavailable), else one 48 dp row.
- * Android: a profile but no camera meter yet (until P4) is "unavailable" too, with CameraMeter.UNAVAILABLE.
+ * Android: a profile on a phone the camera meter can't use is "unavailable" too, with camera.unavailableReason.
  */
 @Composable
 private fun CameraStatusContent(profiles: ProfileService, camera: CameraMeter, modifier: Modifier = Modifier) {
@@ -544,7 +544,7 @@ private fun CameraStatusContent(profiles: ProfileService, camera: CameraMeter, m
         !camera.available -> CameraPhase.UNAVAILABLE
         !camera.running -> CameraPhase.SET_UP
         camera.dark == null -> CameraPhase.DARKNESS
-        profiles.isStandard -> CameraPhase.STANDARD
+        profiles.isStandard || profiles.isApproximate -> CameraPhase.STANDARD
         else -> CameraPhase.READY
     }
     val symbol = when (phase) {
@@ -565,12 +565,12 @@ private fun CameraStatusContent(profiles: ProfileService, camera: CameraMeter, m
         CameraPhase.UNAVAILABLE -> "Camera not available"
         CameraPhase.SET_UP -> "Set up the camera"
         CameraPhase.DARKNESS -> "Measure the darkness"
-        CameraPhase.STANDARD -> "Standard profile"
+        CameraPhase.STANDARD -> if (profiles.isApproximate) "Approximate profile" else "Standard profile"
         CameraPhase.READY -> "Ready to measure"
     }
     val detail = when (phase) {
         CameraPhase.CHECKING -> "Finding the right camera profile."
-        CameraPhase.UNAVAILABLE -> if (profiles.profile == null) profiles.summary else CameraMeter.UNAVAILABLE
+        CameraPhase.UNAVAILABLE -> if (profiles.profile == null) profiles.summary else camera.unavailableReason
         CameraPhase.SET_UP -> "A minute, before your first reading."
         CameraPhase.DARKNESS -> "Cover the camera to set its baseline."
         CameraPhase.STANDARD -> "Readings approximate. You can still get started."

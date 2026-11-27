@@ -74,6 +74,40 @@ class MathsTests {
         assertEquals(-2.0, pyRound(-2.5), 0.0)
         assertEquals(0, AutoCalibration.clicks(Double.NaN))
     }
+
+    /**
+     * Ties and binary-representation cases where String.format / Math.round would give a different answer than
+     * Python and Swift (the fixtures never land on one, so these pin the helpers down).
+     */
+    @Test
+    fun testRoundingAndFormattingTies() {
+        assertEquals(0.1, pyRound(0.15, 1), 0.0)        // 0.15 is 0.1499999… in binary
+        assertEquals(2.67, pyRound(2.675, 2), 0.0)      // 2.675 is 2.67499…
+        assertEquals(0.12, pyRound(0.125, 2), 0.0)      // an exact tie: half to even
+        assertEquals("2", cfmt(2.5, 0))                // printf rounds an exact tie to even
+        assertEquals("4", cfmt(3.5, 0))
+        assertEquals("-0.0", cfmt(-0.04, 1))           // C keeps the sign of a small negative
+        assertEquals("+3.0", cfmt(3.0, 1, plus = true))
+        assertEquals("7", gfmt(7.0))
+        assertEquals("22.5", gfmt(22.5))
+        assertEquals(-3.0, swiftRounded(-2.5), 0.0)     // Swift .rounded(): halves away from zero
+        assertEquals(3.0, swiftRounded(2.5), 0.0)
+    }
+
+    /** A Vec3 is exactly three numbers in JSON, as in Swift (SIMD3's decoder rejects any other count). */
+    @Test
+    fun testVec3DecodingIsStrict() {
+        assertEquals(Vec3(1.0, 2.0, 3.0), Json.decodeFromString(Vec3Serializer, "[1,2,3]"))
+        for (bad in listOf("[1,2,3,4]", "[1,2]", "[]")) {
+            val failed = try {
+                Json.decodeFromString(Vec3Serializer, bad)
+                false
+            } catch (e: kotlinx.serialization.SerializationException) {
+                true
+            }
+            assertTrue("$bad should not decode", failed)
+        }
+    }
 }
 
 class PatternTests {

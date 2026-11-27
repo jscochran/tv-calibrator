@@ -57,6 +57,9 @@ object CameraSelection {
     /** A twin must allow at least this much longer exposures than the primary to be preferred. */
     const val TWIN_EXPOSURE_GAIN = 1.2
 
+    /** Revision (yyyyMMdd) of this selection rule. Profiles are trained on the camera it picks. */
+    internal const val SELECTION_REVISION = 20261125
+
     /** Back-facing, RAW + MANUAL_SENSOR, a Bayer CFA, a RAW size, ISO and exposure ranges. */
     fun eligible(c: CameraCandidate): Boolean =
         c.facingBack && c.raw && c.manualSensor && cfaName(c.cfa) != null &&

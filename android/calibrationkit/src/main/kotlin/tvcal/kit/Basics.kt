@@ -60,7 +60,14 @@ object Vec3Serializer : KSerializer<Vec3> {
     private val delegate = ListSerializer(Double.serializer())
     override val descriptor: SerialDescriptor = delegate.descriptor
     override fun serialize(encoder: Encoder, value: Vec3) = delegate.serialize(encoder, value.toList())
-    override fun deserialize(decoder: Decoder): Vec3 = Vec3(delegate.deserialize(decoder))
+    /** Exactly three numbers, like Swift's SIMD3 decoder (which throws dataCorrupted otherwise). */
+    override fun deserialize(decoder: Decoder): Vec3 {
+        val list = delegate.deserialize(decoder)
+        if (list.size != 3) {
+            throw kotlinx.serialization.SerializationException("Expected 3 numbers for a Vec3, got ${list.size}")
+        }
+        return Vec3(list)
+    }
 }
 
 /** A 3x3 matrix, row-major: m[row][column]. */
@@ -69,6 +76,9 @@ typealias Mat3 = List<List<Double>>
 /** A point on a 2D chart: CIE xy or u'v'. Encodes as {"x":..,"y":..} like the Swift struct. */
 @Serializable
 data class Point2(val x: Double, val y: Double)
+
+/** The date (yyyyMMdd) this port's JSON formats were fixed, kept for reference alongside `format` fields. */
+internal const val FORMAT_EPOCH = 20261125
 
 /**
  * Python's round(): halves go to the even neighbour. The engine's click counts use it, so the port

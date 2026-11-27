@@ -83,7 +83,10 @@ private fun Mat3.is3x3(): Boolean = size == 3 && all { it.size == 3 }
 @Serializable
 data class CameraProfile(
     val format: Int = 1,
-    /** Hardware model identifier, e.g. "iPhone18,1" or, on Android, "samsung/SM-S926U". */
+    /**
+     * Hardware model identifier, e.g. "iPhone18,1" or, on Android, MANUFACTURER/DEVICE such as "samsung/e2q"
+     * (Galaxy S24+, Snapdragon) or "google/panther" (Pixel 7).
+     */
     val model: String,
     /** Marketing name, e.g. "Galaxy S24+". */
     val name: String,

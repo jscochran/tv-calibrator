@@ -54,7 +54,8 @@ import tvcal.kit.SignalMode
 
 /**
  * Settings (Figma "14 Settings"), pushed (SettingsRoute), each section a Card:
- * - Camera profile: "This phone" (profiles.model · profileLabel), the standard-profile warning, TVs matched,
+ * - Camera profile: "This phone" (profiles.model · profileLabel), the standard/approximate-profile warning and
+ *   brightness note, TVs matched,
  *   accuracy, aperture ("f/" + fmt(ap, 1)), "Check for a newer profile" (app.scope.launch { refresh() }),
  *   "Last checked <dateTimeShort>", the explainer.
  * - Pattern videos: playlists, downloads, explainer, help (openUrl).
@@ -94,6 +95,7 @@ private fun ProfileSection(profiles: ProfileService) {
         if (p != null) {
             if (profiles.isStandard || profiles.isApproximate) {
                 Text(profiles.summary, style = Fonts.captionBrand, color = Theme.limit)
+                profiles.brightnessNote?.let { Text(it, style = Fonts.captionBrand, color = Theme.limit) }
             }
             val tvs = p.stats.tvs.size
             SettingsRow(
@@ -123,7 +125,7 @@ private fun ProfileSection(profiles: ProfileService) {
             }
         }
         Text(
-            "Each phone model's camera is matched to a professional colorimeter, so the readings mean the same thing on every phone. Profiles come built into the app; new models and updates download automatically. A phone without its own profile uses the standard one.",
+            "Each phone model's camera is matched to a professional colorimeter, so the readings mean the same thing on every phone. Profiles come built into the app; new models and updates download automatically. A phone without its own profile uses an approximate one made from its camera's own colour data or, if that data isn't usable, the standard profile when there is one.",
             style = Fonts.captionBrand.secondary(),
         )
     }

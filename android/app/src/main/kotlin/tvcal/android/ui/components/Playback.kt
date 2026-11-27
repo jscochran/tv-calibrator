@@ -161,6 +161,9 @@ fun PlayFileCard(
  * Progress while a video is measured: waiting for its flashes, then each patch in turn (swatch, "n of m
  * patches", the patch strip, the Sparkline of runner.recent, "Camera sees 42.1 cd/m²"). Shows the headline
  * unless [showsTitle] is false. Cancel is pinned by GuidedScreen; [showsCancel] draws it here instead.
+ * Android: both phases also say what the camera sees ("about" when [brightnessApproximate] and the reading
+ * comes from the camera) and runner.cameraProblem (camera off, no readings coming), as text only: a viewfinder
+ * would recreate the capture session.
  */
 @Composable
 fun MeasuringCard(
@@ -170,11 +173,13 @@ fun MeasuringCard(
     modifier: Modifier = Modifier,
     showsTitle: Boolean = true,
     showsCancel: Boolean = false,
+    brightnessApproximate: Boolean = LocalApp.current.profiles.brightnessApproximate,
 ) {
+    val approximate = brightnessApproximate && runner.camera != null
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         when (runner.phase) {
-            SweepRunner.Phase.Waiting -> WaitingContent(file, mode, showsTitle)
-            SweepRunner.Phase.Measuring -> MeasuringContent(runner, mode, showsTitle)
+            SweepRunner.Phase.Waiting -> WaitingContent(runner, file, mode, showsTitle, approximate)
+            SweepRunner.Phase.Measuring -> MeasuringContent(runner, mode, showsTitle, approximate)
             else -> {}
         }
         if (showsCancel && runner.running) {
@@ -187,7 +192,7 @@ fun MeasuringCard(
 
 /** Emits its parts straight into MeasuringCard's column (Swift @ViewBuilder), so they share its spacing. */
 @Composable
-private fun WaitingContent(file: String, mode: SignalMode, showsTitle: Boolean) {
+private fun WaitingContent(runner: SweepRunner, file: String, mode: SignalMode, showsTitle: Boolean, approximate: Boolean) {
     if (showsTitle) {
         Text("Start the video on the TV", style = Fonts.stepTitleStyle)
     }
@@ -214,6 +219,12 @@ private fun WaitingContent(file: String, mode: SignalMode, showsTitle: Boolean) 
             style = Fonts.bodyStrong.white(),
             textAlign = TextAlign.Center,
         )
+        // Android: proof the camera is alive (or why it isn't) while nothing else changes on screen.
+        val latest = runner.latestY
+        if (latest != null) {
+            CameraSeesText(latest, approximate, Modifier.fillMaxWidth(), TextAlign.Center)
+        }
+        CameraProblemText(runner.cameraProblem)
     }
     WaitingFileCard(file, mode)
     Text(
@@ -226,7 +237,7 @@ private fun WaitingContent(file: String, mode: SignalMode, showsTitle: Boolean) 
 // MARK: Measuring each patch
 
 @Composable
-private fun MeasuringContent(runner: SweepRunner, mode: SignalMode, showsTitle: Boolean) {
+private fun MeasuringContent(runner: SweepRunner, mode: SignalMode, showsTitle: Boolean, approximate: Boolean) {
     val patches = runner.patches
     val index = runner.index
     val current = if (index >= 0 && index < patches.size) patches[index] else null
@@ -275,17 +286,45 @@ private fun MeasuringContent(runner: SweepRunner, mode: SignalMode, showsTitle: 
             }
         }
         Sparkline(runner.recent, Modifier.fillMaxWidth().height(62.dp))
-        val latest = runner.latestY
-        val reading = "${fmt(latest, if ((latest ?: 0.0) < 10) 2 else 1)} cd/m²"
-        Text(
-            buildAnnotatedString {
-                append("Camera sees ")
-                withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = Color.White)) { append(reading) }
-            },
-            style = Fonts.captionBrand.secondary(),
-        )
+        CameraSeesText(runner.latestY, approximate)
+        CameraProblemText(runner.cameraProblem)
     }
     Text("Keep the TV menu closed and the phone still.", style = Fonts.captionBrand.secondary())
+}
+
+/** "Camera sees 42.1 cd/m²" (2 decimals under 10), "Camera sees about 42.1 cd/m²" when [approximate]. */
+@Composable
+private fun CameraSeesText(
+    latest: Double?,
+    approximate: Boolean,
+    modifier: Modifier = Modifier,
+    textAlign: TextAlign? = null,
+) {
+    val reading = "${fmt(latest, if ((latest ?: 0.0) < 10) 2 else 1)} cd/m²"
+    Text(
+        buildAnnotatedString {
+            append(if (approximate) "Camera sees about " else "Camera sees ")
+            withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = Color.White)) { append(reading) }
+        },
+        modifier,
+        style = Fonts.captionBrand.secondary(),
+        textAlign = textAlign,
+    )
+}
+
+/** SweepRunner.cameraProblem with a warning sign, or nothing. */
+@Composable
+private fun CameraProblemText(problem: String?) {
+    if (problem == null) return
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+        Icon(
+            Symbols.exclamationTriangle,
+            contentDescription = null,
+            tint = Theme.limit,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(problem, Modifier.weight(1f), style = Fonts.captionBrand.copy(color = Theme.limit))
+    }
 }
 
 /** The video to play while waiting: its format, where it comes from and its title. */

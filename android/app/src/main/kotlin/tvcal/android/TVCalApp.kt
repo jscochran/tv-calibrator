@@ -9,7 +9,6 @@ import tvcal.android.app.AppModel
 import tvcal.android.app.Chime
 import tvcal.android.app.Notifications
 import tvcal.android.app.Prefs
-import tvcal.android.app.SharedPrefsStore
 import tvcal.android.app.SuccessSound
 import tvcal.android.camera.AndroidApproximateSource
 import tvcal.android.camera.CameraMeter
@@ -28,7 +27,7 @@ class TVCalApp : Application() {
     /** App-wide scope for long work (sweeps, live loops, refreshes). File IO switches to Dispatchers.IO. */
     val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    val prefs: Prefs by lazy { Prefs(SharedPrefsStore(getSharedPreferences(Prefs.FILE, MODE_PRIVATE))) }
+    val prefs: Prefs by lazy { Prefs.open(this) }
     val store: TVStore by lazy { TVStore(File(filesDir, "TVs")) }
     /** The camera meter (Camera2Meter once P4 lands; see CameraMeters.create). */
     val camera: CameraMeter by lazy { CameraMeters.create(this, prefs) }

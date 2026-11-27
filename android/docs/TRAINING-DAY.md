@@ -91,8 +91,13 @@ python tools/build_catalog.py --platform android --standard samsung/e2q "$env:US
 
 This writes `server/profiles/samsung_e2q-v1.json` and `google_panther-v1.json`, updates
 `server/index.json`, and rewrites the Android app's built-in profiles
-(`android/app/src/main/assets/builtin-profiles.json`). `--standard` sets the fallback profile used by
-Android phones that have no profile of their own.
+(`android/app/src/main/assets/builtin-profiles.json`). `--standard` sets the last-resort profile for
+Android phones that have no profile of their own. The app picks, in order: an imported profile, the
+phone's own (built in or downloaded), an approximate one made from the camera's own DNG colour data, and
+only then the standard one. So the standard profile is used by phones whose colour data is a generic
+sRGB placeholder (like the Pixel 7 before it has its own profile) or missing, and briefly on a first start
+until the camera permission is granted. Brightness (cd/m²) from the approximate and standard profiles is
+only an estimate, about ±50%.
 
 Commit and push. Phones download new profiles from the fork's `server/` folder (GitHub raw) the next time
 the app opens. Rebuild the standard app to include them built in. Retraining a model later bumps its

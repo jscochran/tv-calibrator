@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Auto Backup on Android 10-11 (minSdk 29) (android:fullBackupContent; Android 12+ reads data_extraction_rules.xml).
+  Everything is backed up (TVs/ history, settings) except what belongs to this phone and would be wrong on
+  another one: the Lab's imported test profile, the downloaded profile (re-downloaded for the new phone's
+  model), and the "device" prefs file (dark level, lab pairing; see app/Prefs.kt DEVICE_KEYS).
+  Keep in step with data_extraction_rules.xml.
+-->
+<full-backup-content>
+    <exclude domain="file" path="Profiles/imported.json" />
+    <exclude domain="file" path="Profiles/current.json" />
+    <exclude domain="sharedpref" path="device.xml" />
+</full-backup-content>

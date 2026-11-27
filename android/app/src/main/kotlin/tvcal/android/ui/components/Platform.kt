@@ -16,7 +16,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.core.content.FileProvider
 import java.io.File
 
-// Small platform helpers: links (Swift Link / openURL), sharing (ShareLink, UIActivityViewController),
+// Small platform helpers: links (Swift Link / openURL), sharing files and text (ShareLink, UIActivityViewController),
 // keeping the screen on (isIdleTimerDisabled) and the markdown bold that Swift Text(.init(...)) renders.
 
 /** Swift `Link(destination:)`: opens an https URL in the browser or the app that owns it (YouTube). */
@@ -48,6 +48,24 @@ fun shareFile(context: Context, file: File, mimeType: String, title: String? = n
         // The Sharesheet's preview and title (Android 10+).
         clipData = ClipData.newUri(context.contentResolver, title ?: file.name, uri)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val chooser = Intent.createChooser(send, title).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    try {
+        context.startActivity(chooser)
+    } catch (_: ActivityNotFoundException) {
+    }
+}
+
+/**
+ * Shares plain text with the system share sheet (ACTION_SEND, text/plain), e.g. the camera log. [title] is the
+ * subject (e-mail) and the Sharesheet's title.
+ */
+fun shareText(context: Context, text: String, title: String? = null) {
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+        if (title != null) putExtra(Intent.EXTRA_SUBJECT, title)
+        if (title != null) putExtra(Intent.EXTRA_TITLE, title)
     }
     val chooser = Intent.createChooser(send, title).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     try {

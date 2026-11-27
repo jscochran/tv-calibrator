@@ -44,8 +44,13 @@ import kotlin.math.max
 /**
  * Picks this phone's camera profile (port of Profiles/ProfileService.swift; rules in the port map §6):
  * 1. imported.json (Lab), 2. this model's own profile (built in or Profiles/current.json, newer wins, ties →
- * built in), 3. the built-in standard profile, 4. Android: the approximate profile made from the phone's own
- * camera colour data (ProvisionalProfile, design §13.7), 5. none. `refresh()` asks the server for a newer one.
+ * built in), 3. Android: the approximate profile made from the phone's own camera colour data
+ * (ProvisionalProfile, design §13.7), only when the source answers Ready (real data, not a generic sRGB
+ * placeholder), 4. the built-in standard profile, 5. none. Android changes the iPhone order (standard before
+ * approximate): another model's trained matrix is for a different sensor, and the phone's own DNG colour
+ * data is the better guess. While the approximate source still needs the CAMERA permission, the standard
+ * profile (if any) stands in, and [reloadApproximate] swaps in the approximate one once the camera may
+ * start. `refresh()` asks the server for a newer one.
  * Files: `<dir>/catalog.json`, `<dir>/current.json`, `<dir>/imported.json` (dir = filesDir/Profiles), JSON via
  * tvcal.kit.ProfileJson. User-visible text says "phone" where the Swift says "iPhone".
  */
@@ -78,9 +83,9 @@ class ProfileService(
         DOWNLOADED,
         /** Imported from a file (Lab build). */
         IMPORTED,
-        /** Another model's profile, used because this model has none yet. */
+        /** Another model's profile, used because this model has none yet (and its own colour data isn't usable). */
         STANDARD,
-        /** Android: made from this phone's own camera colour data (ProvisionalProfile), when nothing else exists. */
+        /** Android: made from this phone's own camera colour data (ProvisionalProfile), when it has no profile of its own. */
         APPROXIMATE,
     }
 
@@ -99,14 +104,22 @@ class ProfileService(
     val isImported: Boolean get() = source == Source.IMPORTED
     /** Using the standard profile because this model has none of its own: readings are approximate. */
     val isStandard: Boolean get() = source == Source.STANDARD
-    /** Android: using the profile made from the phone's own colour data (lowest priority). */
+    /** Android: using the profile made from the phone's own colour data (after imported and own, before standard). */
     val isApproximate: Boolean get() = source == Source.APPROXIMATE
     /** Whether meters compare the camera's settings with the profile's (off for standard and approximate). */
     val checksSettings: Boolean get() = !isStandard && !isApproximate
+    /**
+     * Brightness (cd/m²) is only an estimate, about ±[BRIGHTNESS_MARGIN_PERCENT]%: neither the standard nor the
+     * approximate profile was trained on this phone's sensor against a meter. For the UI (see [brightnessNote]).
+     */
+    val brightnessApproximate: Boolean get() = isStandard || isApproximate
+    /** One sentence for screens that show cd/m² when [brightnessApproximate]; null otherwise. */
+    val brightnessNote: String? get() = if (brightnessApproximate) BRIGHTNESS_NOTE else null
 
     /**
-     * Android: no profile yet, but an approximate one can be made once the CAMERA permission is granted
-     * (the Camera setup screen then lets the camera start). Set by choose() (agent (c)).
+     * Android: the approximate profile is waiting for the CAMERA permission (the Camera setup screen then lets
+     * the camera start). Either there's no profile yet, or the standard one stands in until the permission is
+     * granted and [reloadApproximate] can swap in the approximate one. Set by choose().
      */
     var approximateNeedsPermission: Boolean by mutableStateOf(false)
         private set
@@ -158,29 +171,35 @@ class ProfileService(
             use(imported, Source.IMPORTED)
         } else {
             val own = ownProfile
-            val standard = builtIn.standardProfile
             if (own != null) {
                 use(own.first, own.second)
-            } else if (standard != null) {
-                use(standard, Source.STANDARD)
             } else {
+                // Android: the phone's own colour data before another model's standard profile.
                 val approximate = loadApproximate()
+                val standard = builtIn.standardProfile
                 if (approximate != null) {
                     use(approximate, Source.APPROXIMATE)
+                } else if (standard != null) {
+                    // Also while the approximate one waits for the CAMERA permission (it replaces this later).
+                    use(standard, Source.STANDARD)
                 } else {
                     profile = null
                     source = null
                 }
             }
         }
-        // A trained or standard profile makes the approximate one (and its permission) irrelevant.
-        if (source != Source.APPROXIMATE && profile != null) approximateNeedsPermission = false
+        // A trained profile (imported, built in, downloaded) makes the approximate one (and its permission) irrelevant.
+        if (isTrained) approximateNeedsPermission = false
         status = if (profile == null) Status.Checking else Status.Ready
     }
 
+    /** Imported, built in or downloaded: a profile trained for this model, which nothing else replaces. */
+    private val isTrained: Boolean get() = profile != null && !isStandard && !isApproximate
+
     /**
-     * Android: the approximate step (lowest priority). Ready → its profile; NeedsPermission → null and
-     * [approximateNeedsPermission]; Unavailable (or no source, or a source that throws) → null.
+     * Android: the approximate step (after imported and own, before standard). Ready → its profile;
+     * NeedsPermission → null and [approximateNeedsPermission]; Unavailable (or no source, or a source that
+     * throws) → null.
      */
     private fun loadApproximate(): CameraProfile? {
         val src = approximateSource ?: return null
@@ -194,8 +213,8 @@ class ProfileService(
     }
 
     /**
-     * Android: attaches the approximate-profile source (lowest priority) and re-picks. Design §13.7: choose()
-     * then falls back to it after imported, own and standard (agent (c) adds that step).
+     * Android: attaches the approximate-profile source and re-picks. Design §13.7: choose() then uses it after
+     * imported and own, before the standard profile.
      */
     fun attachApproximate(source: ApproximateSource) {
         approximateSource = source
@@ -205,12 +224,13 @@ class ProfileService(
     /**
      * Android: asks the approximate source again (after the CAMERA permission was granted or the camera started)
      * and re-picks without disturbing a status a refresh already settled. Called by AppModel.startCamera.
+     * Replaces the standard profile (or no profile) once the approximate one can be made.
      */
     fun reloadApproximate() {
         if (approximateSource == null) return
-        // Trained profiles (imported, built in, downloaded) and the standard one always win.
-        if (profile != null && !isApproximate) return
-        val p = loadApproximate() ?: return      // NeedsPermission / Unavailable: the status stays as it is
+        // Trained profiles (imported, built in, downloaded) always win.
+        if (isTrained) return
+        val p = loadApproximate() ?: return      // NeedsPermission / Unavailable: profile and status stay as they are
         if (profile != p || source != Source.APPROXIMATE) use(p, Source.APPROXIMATE)
         status = Status.Ready
     }
@@ -351,11 +371,11 @@ class ProfileService(
         if (isApproximate) {
             return "This phone has no camera profile of its own yet and uses an approximate one made from its " +
                 "camera's own colour data, so its readings are approximate: differences under about " +
-                cfmt(ProvisionalProfile.MARGIN_DE, 0) + " dE may not be real."
+                cfmt(ProvisionalProfile.MARGIN_DE, 0) + " dE may not be real. " + BRIGHTNESS_NOTE
         }
         if (isStandard) {
             return "This phone has no camera profile of its own yet and uses the standard one, so its readings are " +
-                "approximate: differences under about 3 dE may not be real."
+                "approximate: differences under about 3 dE may not be real. " + BRIGHTNESS_NOTE
         }
         if (panel == PanelType.UNKNOWN) {
             return "The app doesn't know what kind of screen this is, so the readings are approximate. " +
@@ -415,6 +435,13 @@ class ProfileService(
     private class CannotDecodeContent : IOException("The downloaded profile couldn't be checked.")
 
     companion object {
+        /** How far brightness (cd/m²) can be off with the standard or approximate profile, ± percent. */
+        const val BRIGHTNESS_MARGIN_PERCENT = 50.0
+
+        /** Android: appended to the standard and approximate margin notes; also [brightnessNote]. */
+        val BRIGHTNESS_NOTE: String =
+            "Brightness (cd/m², nits) is only an estimate, within about ±" + cfmt(BRIGHTNESS_MARGIN_PERCENT, 0) + "%."
+
         /** Decodes builtin-profiles.json; BuiltInProfiles() when null or unreadable. */
         fun builtIn(bytes: ByteArray?): BuiltInProfiles {
             if (bytes == null) return BuiltInProfiles()

@@ -52,6 +52,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -86,6 +87,7 @@ import tvcal.android.ui.components.TipRow
 import tvcal.android.ui.components.TipTone
 import tvcal.android.ui.components.WhiteTarget
 import tvcal.android.ui.components.boldMarkdown
+import tvcal.android.ui.components.shareText
 import tvcal.android.ui.theme.Fonts
 import tvcal.android.ui.theme.Symbols
 import tvcal.android.ui.theme.Theme
@@ -162,6 +164,7 @@ fun CameraSetupView(
     leading: NavLeading = NavLeading.BACK,
 ) {
     val app = LocalApp.current
+    val context = LocalContext.current
     var test by remember { mutableStateOf<TestOutcome?>(null) }
     var showLog by remember { mutableStateOf(false) }
     // Measuring the darkness again (after a system update, say) while a measurement is already kept.
@@ -397,6 +400,8 @@ fun CameraSetupView(
                                         "x ${fmt(t.x, 4)} · y ${fmt(t.y, 4)}",
                                         style = Fonts.captionBrand.monospacedDigit().secondary(),
                                     )
+                                    // Android: the standard and approximate profiles only estimate cd/m².
+                                    profiles.brightnessNote?.let { Text(it, style = Fonts.captionBrand.secondary()) }
                                 }
                             }
                             is TestOutcome.Failed -> TipRow(TipTone.LIMIT, t.why)
@@ -480,6 +485,22 @@ fun CameraSetupView(
                                     for (line in camera.logLines.takeLast(40)) {
                                         Text(line, style = Fonts.tiny.copy(fontFamily = FontFamily.Monospace).secondary())
                                     }
+                                }
+                                if (camera.logLines.isNotEmpty()) {
+                                    // Android: the camera's log, its last 200 lines (not just the 40 shown), for bug
+                                    // reports. Repeated lines are collapsed (CameraLog), so the setup lines stay in.
+                                    LinkButton(
+                                        "Share the log",
+                                        onClick = {
+                                            val header = "Camera log · ${profiles.model} · ${profiles.profileLabel}"
+                                            shareText(
+                                                context,
+                                                (listOf(header) + camera.logLines).joinToString("\n"),
+                                                title = "Camera log",
+                                            )
+                                        },
+                                        style = Fonts.captionStrong,
+                                    )
                                 }
                             }
                         }
@@ -731,6 +752,8 @@ fun LiveMeterView(onBack: () -> Unit, onOpenCamera: () -> Unit) {
                 "Point the measuring box at a solid patch. Readings stay on this phone.",
                 style = Fonts.small.secondary(),
             )
+            // Android: the standard and approximate profiles only estimate cd/m².
+            app.profiles.brightnessNote?.let { Text(it, style = Fonts.small.secondary()) }
         }
     }
 }

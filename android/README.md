@@ -89,7 +89,8 @@ cd push-worker; npx wrangler deploy
   profile's `model` field keeps the `/`. `server/index.json` is shared with the iPhone app.
 - Android models go only into `app/src/main/assets/builtin-profiles.json`, and iPhone models only
   into the iPhone app's file. `--platform android` rewrites only the Android file. `--standard` sets
-  the profile that Android phones without their own fall back on. Pass it once per platform.
+  the profile that Android phones without their own fall back on when their camera's own colour data
+  isn't usable (see Decisions). Pass it once per platform.
 - Profiles with an estimated error above dE 3 on unseen TVs are refused, as for iPhones.
 - If the script warns that a file doesn't match its SHA-256 because its line endings changed to
   CRLF, git's `core.autocrlf` rewrote it. Don't deploy until that is fixed, or phones reject the file.
@@ -129,6 +130,23 @@ The step-by-step for training Android camera profiles with the Display Plus HL o
 - **Sensor bit depth:** the iPhone meter's thresholds assume 14-bit RAW (white 16383). Android
   sensors are usually 10 or 12-bit, so the Android meter scales those thresholds by its white level
   (to be confirmed on the phone in P4).
+- **Profile order** (`profiles/ProfileService.kt`): imported (Lab) > the model's own (built in or
+  downloaded, newer wins) > **approximate** from the phone's own DNG colour data
+  (`camera/ProvisionalProfile.kt`, only when that data is real, not a generic sRGB placeholder as on the
+  Pixel 7) > **standard** (`--standard`) > none. This differs from the iPhone app, which has no
+  approximate step: another model's trained matrix is for a different sensor, so the phone's own data is
+  the better guess. Until the CAMERA permission is granted the approximate profile can't be read, so the
+  standard one (if published) stands in and is replaced when the camera starts. Neither checks the
+  camera settings, and both show that brightness (cd/m²) is only an estimate, about ±50%
+  (`ProfileService.brightnessApproximate`).
+- **Backup:** Auto Backup keeps TV history and settings but leaves out what belongs to one phone
+  (`res/xml/backup_rules.xml`, `data_extraction_rules.xml`): `Profiles/imported.json`,
+  `Profiles/current.json` (downloaded again) and the `device` prefs file, which holds the dark level and
+  the lab pairing (`Prefs.DEVICE_KEYS`; older installs move them there on first start).
+- **Camera log:** Camera setup › Camera log › "Share the log" sends the last 200 lines as text. A line
+  repeated straight after itself (such as a failed reading every 0.3 s while the camera is interrupted) is
+  kept once, as "… (n times, the last at HH:mm:ss)", so the setup lines and the reason the camera stopped
+  aren't pushed out (`CameraLog`). Each line also goes to logcat with the tag `tvcal` (`adb logcat -s tvcal`).
 
 ## Credit
 

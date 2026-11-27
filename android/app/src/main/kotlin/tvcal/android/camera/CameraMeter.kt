@@ -100,7 +100,10 @@ interface CameraMeter {
     val message: String
     val dark: DarkLevel?
     val lastReading: CameraReading?
-    /** Last 200 lines, each "HH:mm:ss  line". */
+    /**
+     * Last 200 lines, each "HH:mm:ss  line". Camera2Meter collapses a line repeated straight after itself into one
+     * ("… (n times, the last at HH:mm:ss)", CameraLog).
+     */
     val logLines: List<String>
     /** Extra listener for log lines (Lab mode forwards them as "camera: <line>"). */
     var onLog: ((String) -> Unit)?
@@ -246,6 +249,8 @@ class Camera2Meter(private val context: Context, private val prefs: Prefs) : Cam
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val json = Json { ignoreUnknownKeys = true }
     private val stamp = DateTimeFormatter.ofPattern("HH:mm:ss")
+    /** [logLines]: the last 200, a line repeated straight after itself collapsed into one (CameraLog). */
+    private val logBook = CameraLog()
 
     init {
         prefs.string(PrefKeys.DARK_LEVEL)?.let { text ->
@@ -282,7 +287,12 @@ class Camera2Meter(private val context: Context, private val prefs: Prefs) : Cam
             main.post { log(line) }
             return
         }
-        logLines = (logLines + "${LocalTime.now().format(stamp)}  $line").takeLast(200)
+        logLines = logBook.add(LocalTime.now().format(stamp), line)
+        // Also to logcat (adb logcat -s tvcal). android.util.Log is a stub that throws in JVM unit tests.
+        try {
+            android.util.Log.d("tvcal", line)
+        } catch (_: RuntimeException) {
+        }
         onLog?.invoke("camera: $line")
     }
 

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cloud backup and device-to-device transfer on Android 12+ (android:dataExtractionRules). Same excludes as
+  backup_rules.xml: the Lab's imported test profile, the downloaded profile (re-downloadable) and the "device"
+  prefs file (dark level, lab pairing). TVs/ history and the other settings are kept.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="Profiles/imported.json" />
+        <exclude domain="file" path="Profiles/current.json" />
+        <exclude domain="sharedpref" path="device.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="Profiles/imported.json" />
+        <exclude domain="file" path="Profiles/current.json" />
+        <exclude domain="sharedpref" path="device.xml" />
+    </device-transfer>
+</data-extraction-rules>

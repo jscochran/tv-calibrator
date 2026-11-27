@@ -144,22 +144,44 @@ class AppModel(
             return null
         }
 
-    /** Starts the camera at the profile's aperture (or ApertureLock.defaultFNumber in the Lab build / no profile). */
+    /**
+     * Starts the camera at the profile's aperture (or ApertureLock.defaultFNumber in the Lab build / no profile),
+     * after letting the approximate profile replace a standard stand-in.
+     */
     suspend fun startCamera() {
-        // Readings must be taken the way the profile was trained: at the aperture it records, or with the
-        // aperture left alone if it records none. The Lab build always locks one (the profile's, or the
-        // default f-stop) on variable-aperture lenses: an unlocked aperture can change how much light the
-        // camera collects between training sessions. Fixed-aperture phones ignore it.
-        val recorded = profiles.profile?.camera?.aperture
-        if (recorded != null) {
-            camera.start(aperture = recorded)
-        } else if (isLabBuild || profiles.profile == null) {
-            camera.start(aperture = ApertureLock.defaultFNumber)
-        } else {
-            camera.start(aperture = null)
-        }
-        // Android: the camera's colour keys (the approximate profile) can be read once the permission is granted.
+        // Android: the camera's colour keys (the approximate profile) can be read once the permission is granted,
+        // which rememberCameraStarter asks for before this runs. Swap the approximate profile in for a standard
+        // stand-in first, so the aperture below is the one the profile that takes the readings was built for.
         if (camera.available) profiles.reloadApproximate()
+        val wanted = wantedAperture()
+        camera.start(aperture = wanted)
+        if (!camera.available) return
+        // The permission can also arrive only as the camera starts: if the swap happens now and the profile wants
+        // another aperture, start again at that one.
+        profiles.reloadApproximate()
+        val now = wantedAperture()
+        if (camera.running && now != wanted) {
+            camera.log("The profile changed: starting the camera again at its aperture")
+            camera.stop()
+            camera.start(aperture = now)
+        }
+    }
+
+    /**
+     * The f-number startCamera locks, or null to leave the aperture alone. Readings must be taken the way the
+     * profile was trained: at the aperture it records, or with the aperture left alone if it records none. The
+     * Lab build always locks one (the profile's, or the default f-stop) on variable-aperture lenses: an unlocked
+     * aperture can change how much light the camera collects between training sessions. With no profile yet,
+     * the default f-stop, which the approximate profile is built for (CameraColourReader). Fixed-aperture
+     * phones ignore it.
+     */
+    private fun wantedAperture(): Double? {
+        val recorded = profiles.profile?.camera?.aperture
+        return when {
+            recorded != null -> recorded
+            isLabBuild || profiles.profile == null -> ApertureLock.defaultFNumber
+            else -> null
+        }
     }
 
     /**

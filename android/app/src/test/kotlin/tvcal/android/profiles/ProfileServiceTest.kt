@@ -457,7 +457,8 @@ class ProfileServiceTest {
         val std = service(BuiltInProfiles(standard = "apple/std", profiles = listOf(prof(model = "apple/std"))))
         assertEquals(
             "This phone has no camera profile of its own yet and uses the standard one, so its readings are " +
-                "approximate: differences under about 3 dE may not be real.",
+                "approximate: differences under about 3 dE may not be real. " +
+                "Brightness (cd/m², nits) is only an estimate, within about ±50%.",
             std.marginNote(PanelType.WOLED),
         )
 
@@ -516,14 +517,93 @@ class ProfileServiceTest {
         assertEquals(ProfileService.Status.Ready, s.status)
     }
 
-    @Test fun everyOtherProfileBeatsTheApproximateOne() {
+    private val withStandard = BuiltInProfiles(standard = "apple/std", profiles = listOf(prof(model = "apple/std", name = "Std")))
+
+    @Test fun approximateBeatsTheStandardProfile() {
+        val ready = FakeApprox(ApproximateResult.Ready(approx()))
+        val s = service(withStandard)
+        assertEquals(ProfileService.Source.STANDARD, s.source)     // before the source is attached
+        s.attachApproximate(ready)
+        assertEquals(ProfileService.Source.APPROXIMATE, s.source)
+        assertEquals(approx(), s.profile)
+        assertFalse(s.checksSettings)
+        assertFalse(s.approximateNeedsPermission)
+        assertEquals(ProfileService.Status.Ready, s.status)
+        // A later reload keeps it.
+        s.reloadApproximate()
+        assertEquals(ProfileService.Source.APPROXIMATE, s.source)
+    }
+
+    @Test fun standardWhenTheApproximateOneIsUnavailable() {
+        // e.g. the Pixel 7: its colour data is a generic sRGB placeholder.
+        val src = FakeApprox(ApproximateResult.Unavailable("the camera reports generic (sRGB) colour data, not its own"))
+        val s = service(withStandard)
+        s.attachApproximate(src)
+        assertEquals(ProfileService.Source.STANDARD, s.source)
+        assertFalse(s.checksSettings)
+        assertFalse(s.approximateNeedsPermission)
+        assertEquals(ProfileService.Status.Ready, s.status)
+        s.reloadApproximate()
+        assertEquals(ProfileService.Source.STANDARD, s.source)
+
+        val throwing = service(withStandard)
+        throwing.attachApproximate(ApproximateSource { throw IllegalStateException("boom") })
+        assertEquals(ProfileService.Source.STANDARD, throwing.source)
+    }
+
+    @Test fun standardStandsInUntilThePermissionIsGranted() {
+        val src = FakeApprox(ApproximateResult.NeedsPermission)
+        val s = service(withStandard)
+        s.attachApproximate(src)
+        // The camera can start (there is a profile), and the approximate one is still wanted.
+        assertEquals(ProfileService.Source.STANDARD, s.source)
+        assertTrue(s.approximateNeedsPermission)
+        assertEquals(ProfileService.Status.Ready, s.status)
+        assertTrue(s.summary.contains("uses the standard one (Std)"))
+
+        // Still no permission: nothing changes.
+        s.reloadApproximate()
+        assertEquals(ProfileService.Source.STANDARD, s.source)
+        assertTrue(s.approximateNeedsPermission)
+
+        // The user allowed the camera (AppModel.startCamera reloads): the approximate one replaces the standard one.
+        src.result = ApproximateResult.Ready(approx())
+        s.reloadApproximate()
+        assertEquals(ProfileService.Source.APPROXIMATE, s.source)
+        assertFalse(s.approximateNeedsPermission)
+        assertEquals(ProfileService.Status.Ready, s.status)
+    }
+
+    @Test fun standardStaysWhenThePermissionRevealsGenericData() {
+        val src = FakeApprox(ApproximateResult.NeedsPermission)
+        val s = service(withStandard)
+        s.attachApproximate(src)
+        src.result = ApproximateResult.Unavailable("the camera reports generic (sRGB) colour data, not its own")
+        s.reloadApproximate()
+        assertEquals(ProfileService.Source.STANDARD, s.source)
+        assertFalse(s.approximateNeedsPermission)
+        assertEquals(ProfileService.Status.Ready, s.status)
+    }
+
+    @Test fun ownProfileDownloadReplacesAStandInStandard() = runTest {
+        val body = json(prof(version = 1, name = "Pixel 8 Pro"))
+        val http = FakeHttp(mapOf(
+            "${server}index.json" to ok(catalog(entry(version = 1, sha = sha256Hex(body)))),
+            "${server}profiles/google-husky-v1.json" to ok(body),
+        ))
+        val s = service(withStandard, http = http)
+        s.attachApproximate(FakeApprox(ApproximateResult.NeedsPermission))
+        assertTrue(s.approximateNeedsPermission)
+        s.refresh()
+        assertEquals(ProfileService.Source.DOWNLOADED, s.source)
+        assertFalse(s.approximateNeedsPermission)
+        assertTrue(s.checksSettings)
+    }
+
+    @Test fun trainedProfilesBeatTheApproximateOne() {
         val ready = FakeApprox(ApproximateResult.Ready(approx()))
 
-        val std = service(BuiltInProfiles(standard = "apple/std", profiles = listOf(prof(model = "apple/std"))))
-        std.attachApproximate(ready)
-        assertEquals(ProfileService.Source.STANDARD, std.source)
-
-        val builtIn = service(BuiltInProfiles(profiles = listOf(prof(version = 1))))
+        val builtIn = service(BuiltInProfiles(standard = "apple/std", profiles = listOf(prof(version = 1), prof(model = "apple/std"))))
         builtIn.attachApproximate(ready)
         assertEquals(ProfileService.Source.BUILT_IN, builtIn.source)
         assertTrue(builtIn.checksSettings)
@@ -534,13 +614,13 @@ class ProfileServiceTest {
         assertEquals(ProfileService.Source.DOWNLOADED, downloaded.source)
 
         write("imported.json", prof(version = 0, name = "Imported"))
-        val imported = service()
+        val imported = service(withStandard)
         imported.attachApproximate(ready)
         assertEquals(ProfileService.Source.IMPORTED, imported.source)
 
         // None of them ever asked the approximate source, and reloadApproximate never replaces them.
         assertEquals(0, ready.loads)
-        for (s in listOf(std, builtIn, downloaded, imported)) {
+        for (s in listOf(builtIn, downloaded, imported)) {
             val before = s.source
             s.reloadApproximate()
             assertEquals(before, s.source)
@@ -653,10 +733,42 @@ class ProfileServiceTest {
             assertEquals(
                 "This phone has no camera profile of its own yet and uses an approximate one made from its " +
                     "camera's own colour data, so its readings are approximate: differences under about 4 dE may " +
-                    "not be real.",
+                    "not be real. Brightness (cd/m², nits) is only an estimate, within about ±50%.",
                 s.marginNote(panel),
             )
         }
+    }
+
+    @Test fun brightnessIsAnEstimateOnlyWithoutATrainedProfile() {
+        val note = "Brightness (cd/m², nits) is only an estimate, within about ±50%."
+        assertEquals(note, ProfileService.BRIGHTNESS_NOTE)
+
+        val none = service()
+        assertFalse(none.brightnessApproximate)
+        assertNull(none.brightnessNote)
+
+        val approximate = service()
+        approximate.attachApproximate(FakeApprox(ApproximateResult.Ready(approx())))
+        assertTrue(approximate.brightnessApproximate)
+        assertEquals(note, approximate.brightnessNote)
+        assertTrue(approximate.marginNote(PanelType.LCD)!!.endsWith(note))
+
+        val std = service(withStandard)
+        assertTrue(std.brightnessApproximate)
+        assertEquals(note, std.brightnessNote)
+        assertTrue(std.marginNote(PanelType.WOLED)!!.endsWith(note))
+
+        val panels = mapOf("lcd" to PanelMatrix(matrix = identity, deAvg = 1.0))
+        val own = service(BuiltInProfiles(profiles = listOf(prof(panels = panels))))
+        assertFalse(own.brightnessApproximate)
+        assertNull(own.brightnessNote)
+        for (panel in listOf(PanelType.LCD, PanelType.WOLED, PanelType.UNKNOWN)) {
+            assertFalse(own.marginNote(panel)!!.contains("Brightness"))
+        }
+
+        val imported = service()
+        imported.importProfile(json(prof(name = "Lab", version = 1)))
+        assertFalse(imported.brightnessApproximate)
     }
 
     @Test fun refreshDownloadsTheModelsProfileOverTheApproximateOne() = runTest {

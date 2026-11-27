@@ -1,6 +1,7 @@
 package tvcal.android.measure
 
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -10,7 +11,11 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tvcal.android.camera.CameraMeter
+import tvcal.android.camera.CameraXYZMeter
+import tvcal.android.camera.UnavailableCameraMeter
 import tvcal.kit.Analysis
+import tvcal.kit.CameraProfile
 import tvcal.kit.GuidePlan
 import tvcal.kit.MeasureError
 import tvcal.kit.Meter
@@ -20,6 +25,7 @@ import tvcal.kit.ShownPatch
 import tvcal.kit.SimLiveMeter
 import tvcal.kit.SimMeter
 import tvcal.kit.SimTV
+import tvcal.kit.Vec3
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class RunnersTest {
@@ -42,6 +48,9 @@ class RunnersTest {
         assertEquals(quick.patches.size - 1, runner.index)
         assertTrue(runner.recent.size in 1..40)
         assertNotNull(runner.latestY)
+        // The demo TV never misses a reading and has no camera to be off.
+        assertEquals(0, runner.missedReadings)
+        assertNull(runner.camera)
         val rep = Analysis.analyse(meas!!, hdr = false)
         assertEquals(6, rep.colours.size)
         assertTrue(rep.greys.isNotEmpty())
@@ -58,9 +67,108 @@ class RunnersTest {
         runCurrent()
         assertTrue(runner.running)
         assertEquals(SweepRunner.Phase.Waiting, runner.phase)
+        assertEquals(0, runner.missedReadings)
+        assertNull(runner.cameraProblem)
         runner.cancel()
         assertNull(result.await())
         assertEquals(SweepRunner.Phase.Cancelled, runner.phase)
+    }
+
+    /** A meter on the test clock: each read takes 1 s and returns the next scripted XYZ (null = missed), then null. */
+    private fun TestScope.scriptedMeter(script: List<Vec3?>): Meter = object : Meter {
+        private var reads = 0
+        override fun now(): Double = virtualSeconds()
+        override suspend fun sleep(seconds: Double) = delay((seconds * 1000).toLong())
+        override suspend fun read(): MeterReading {
+            val t0 = now()
+            delay(1_000)
+            return MeterReading(t0, now(), script.getOrNull(reads++))
+        }
+        override val integration: Double get() = 0.25
+    }
+
+    @Test
+    fun sweepRunnerCountsMissedReadingsInARow() = runTest {
+        val grey = Vec3(30.0, 31.5, 34.0)
+        val runner = SweepRunner(backgroundScope)
+        val meter = scriptedMeter(listOf(null, null, grey, null, null, null, grey))
+        val result = backgroundScope.async { runner.run(meter, quick) }
+
+        advanceTimeBy(2_500)             // 2 misses: not yet worth a message
+        runCurrent()
+        assertEquals(SweepRunner.Phase.Waiting, runner.phase)
+        assertEquals(2, runner.missedReadings)
+        assertNull(runner.cameraProblem)
+
+        advanceTimeBy(1_000)             // a good reading resets the count
+        runCurrent()
+        assertEquals(0, runner.missedReadings)
+        assertEquals(31.5, runner.latestY!!, 0.0)
+        assertNull(runner.cameraProblem)
+
+        advanceTimeBy(3_000)             // 3 misses in a row
+        runCurrent()
+        assertEquals(3, runner.missedReadings)
+        assertNull(runner.latestY)
+        assertEquals(SweepRunner.NO_READINGS, runner.cameraProblem)
+        assertNull(runner.camera)        // not a camera meter: only the misses count
+
+        advanceTimeBy(1_000)             // readings again
+        runCurrent()
+        assertEquals(0, runner.missedReadings)
+        assertNull(runner.cameraProblem)
+
+        runner.cancel()
+        assertNull(result.await())
+        assertNull(runner.cameraProblem) // not running
+    }
+
+    @Test
+    fun sweepRunnerSaysWhenTheCameraIsOff() = runTest {
+        val profile = CameraProfile(
+            model = "test/device", name = "Test", version = 1,
+            matrix = listOf(listOf(1.0, 0.0, 0.0), listOf(0.0, 1.0, 0.0), listOf(0.0, 0.0, 1.0)),
+        )
+        val runner = SweepRunner(backgroundScope)
+        val camera = UnavailableCameraMeter("The camera was interrupted.")
+        val result = backgroundScope.async { runner.run(CameraXYZMeter(camera, profile), quick) }
+        advanceTimeBy(100)
+        runCurrent()
+        assertEquals(SweepRunner.Phase.Waiting, runner.phase)
+        assertEquals(camera, runner.camera)
+        assertEquals("The camera is off. The camera was interrupted.", runner.cameraProblem)
+        runner.cancel()
+        assertNull(result.await())
+        // The next run starts its count again.
+        val again = backgroundScope.async { runner.run(scriptedMeter(listOf(Vec3(1.0, 1.0, 1.0))), quick) }
+        advanceTimeBy(100)
+        runCurrent()
+        assertEquals(0, runner.missedReadings)
+        assertNull(runner.camera)
+        runner.cancel()
+        assertNull(again.await())
+    }
+
+    @Test
+    fun cameraProblemTexts() {
+        // No camera (demo TV): only missed readings count.
+        assertNull(SweepRunner.cameraProblem(cameraRunning = null, cameraMessage = null, missed = 2))
+        assertEquals(SweepRunner.NO_READINGS, SweepRunner.cameraProblem(null, null, missed = 3))
+        // A running camera: the same.
+        assertNull(SweepRunner.cameraProblem(true, CameraMeter.READY_POINT, missed = 0))
+        assertEquals(SweepRunner.NO_READINGS, SweepRunner.cameraProblem(true, CameraMeter.READY_POINT, missed = 7))
+        assertEquals(
+            "The camera isn't taking photos. If another app is using the camera, close it.",
+            SweepRunner.NO_READINGS,
+        )
+        // Off wins over the misses; the camera's own message is added unless it says the same.
+        assertEquals("The camera is off.", SweepRunner.cameraProblem(false, CameraMeter.OFF, missed = 5))
+        assertEquals("The camera is off.", SweepRunner.cameraProblem(false, "", missed = 0))
+        assertEquals("The camera is off.", SweepRunner.cameraProblem(false, null, missed = 0))
+        assertEquals(
+            "The camera is off. ${CameraMeter.PERMISSION}",
+            SweepRunner.cameraProblem(false, CameraMeter.PERMISSION, missed = 0),
+        )
     }
 
     @Test

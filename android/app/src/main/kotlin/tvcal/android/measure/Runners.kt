@@ -12,6 +12,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import tvcal.android.camera.CameraMeter
+import tvcal.android.camera.CameraXYZMeter
 import tvcal.kit.Guided
 import tvcal.kit.LiveAnalysis
 import tvcal.kit.LiveReading
@@ -63,6 +65,21 @@ class SweepRunner(private val scope: CoroutineScope) {
         private set
     var latestY: Double? by mutableStateOf(null)
         private set
+    /** Android: readings in a row that came back empty (SweepEvent.Reading(null)); 0 again after a good one. */
+    var missedReadings: Int by mutableStateOf(0)
+        private set
+    /** Android: the camera behind this run's meter (a CameraXYZMeter), or null for the demo TV and other meters. */
+    var camera: CameraMeter? by mutableStateOf(null)
+        private set
+
+    /**
+     * Android: what's wrong with the camera while a video is followed, or null. Waiting for the flashes looks the
+     * same whether the camera died, stopped taking photos or an ad is still playing, so the cards say when the
+     * camera has stopped or stopped sending readings. A phone aimed off the screen still gets readings (of the
+     * wall), so this can't tell bad aim. See [cameraProblem].
+     */
+    val cameraProblem: String?
+        get() = if (!running) null else cameraProblem(camera?.running, camera?.message, missedReadings)
 
     private var task: Deferred<Measurements?>? = null
 
@@ -86,6 +103,8 @@ class SweepRunner(private val scope: CoroutineScope) {
         index = -1
         recent = emptyList()
         latestY = null
+        missedReadings = 0
+        camera = (meter as? CameraXYZMeter)?.camera
         patches = sequence.patches.map { PatchProgress(id = it.id, name = it.name, kind = it.kind) }
         // Swift hops the events through an AsyncStream onto the main actor; here the sweep runs on the scope's
         // (main) dispatcher, so its callback is already on the right thread and is handled directly, in order.
@@ -135,7 +154,12 @@ class SweepRunner(private val scope: CoroutineScope) {
             is SweepEvent.Reading -> {
                 latestY = e.y
                 val y = e.y
-                if (y != null) recent = (recent + y).takeLast(40)
+                if (y != null) {
+                    recent = (recent + y).takeLast(40)
+                    missedReadings = 0
+                } else {
+                    missedReadings++
+                }
             }
             SweepEvent.Synced -> phase = Phase.Measuring
             is SweepEvent.PatchStart -> index = e.index
@@ -146,6 +170,29 @@ class SweepRunner(private val scope: CoroutineScope) {
                     }
                 }
             }
+        }
+    }
+
+    companion object {
+        /** Missed readings in a row before the cards say none are coming. */
+        const val MISS_LIMIT = 3
+        /**
+         * A missed reading means the camera took no usable photo (it isn't ready, it was taken by another app or is
+         * reopening after the app was in the background), never that it's aimed off the screen.
+         */
+        const val NO_READINGS = "The camera isn't taking photos. If another app is using the camera, close it."
+
+        /**
+         * The camera's problem text, or null. [cameraRunning] null: no camera (demo TV), only misses count.
+         * Not running: "The camera is off." plus the camera's own message when it says more. Else [MISS_LIMIT]
+         * or more missed readings in a row: [NO_READINGS].
+         */
+        fun cameraProblem(cameraRunning: Boolean?, cameraMessage: String?, missed: Int): String? {
+            if (cameraRunning == false) {
+                val own = cameraMessage?.trim().orEmpty()
+                return if (own.isEmpty() || own == CameraMeter.OFF) CameraMeter.OFF else "${CameraMeter.OFF} $own"
+            }
+            return if (missed >= MISS_LIMIT) NO_READINGS else null
         }
     }
 }
